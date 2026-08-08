@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101318">
+  <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <title>Codex 随行</title>
+</head>
+<body>
+  <section id="loginScreen" class="login-screen" hidden>
+    <div class="login-card">
+      <div class="mark" aria-hidden="true"><span>C</span></div>
+      <p class="eyebrow">PRIVATE SSH CONSOLE</p>
+      <h1>把 Codex<br>装进口袋</h1>
+      <p class="login-copy">在电脑终端运行配对命令，然后输入 8 位配对码。连接全程留在 SSH 隧道中。</p>
+      <form id="pairForm" class="pair-form">
+        <label for="pairCode">配对码</label>
+        <input id="pairCode" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" placeholder="00000000" required>
+        <button type="submit" class="button primary">连接这台电脑</button>
+      </form>
+      <p id="pairError" class="form-error" role="alert"></p>
+    </div>
+  </section>
+
+  <div id="app" class="app-shell" hidden>
+    <main class="workspace">
+      <aside class="session-rail">
+        <div class="rail-head">
+          <p class="eyebrow">THREADS</p>
+          <button id="refreshThreadsButton" class="text-button">刷新</button>
+        </div>
+        <div id="desktopThreadList" class="thread-list"></div>
+      </aside>
+
+      <section id="chatView" class="view chat-view active" data-view="chat">
+        <div id="emptyState" class="empty-state">
+          <span class="empty-orbit"><i></i></span>
+          <p class="eyebrow">READY WHEN YOU ARE</p>
+          <h2>从手机发起下一步</h2>
+          <p>选择项目，新建或打开会话。Codex 会继续使用这台电脑上的工具、技能和 ningmengchang 登录。</p>
+        </div>
+        <div id="approvalStack" class="approval-stack"></div>
+        <div id="threadLoading" class="thread-loading" hidden><span class="thread-loading-spinner"></span><p>正在加载会话…<small id="threadLoadingProgress"></small></p></div>
+        <button id="loadOlderButton" class="load-older" type="button" hidden>加载更早历史 ↑</button>
+        <div id="timeline" class="timeline" aria-live="polite"></div>
+        <section id="planDecisionBar" class="plan-decision" hidden>
+          <div><strong>方案已形成</strong><span>继续补充，或确认后切换到执行模式。</span></div>
+          <div class="plan-decision-actions">
+            <button id="refinePlanButton" type="button" class="button">继续完善方案</button>
+            <button id="executePlanButton" type="button" class="button primary">按此方案实施</button>
+          </div>
+        </section>
+        <button id="jumpQuestionButton" class="scroll-question" hidden>上一问题 ↑</button>
+        <button id="scrollLatestButton" class="scroll-latest" hidden>回到最新 ↓</button>
+        <form id="composer" class="composer">
+          <div id="mentionTray" class="mention-tray"></div>
+          <textarea id="promptInput" rows="1" enterkeyhint="send" autocapitalize="sentences" placeholder="告诉 Codex 下一步做什么…"></textarea>
+          <div class="composer-footer">
+            <span class="composer-meta">
+              <span id="connectionStatus" class="connection-pill" data-state="connecting" title="连接状态"><i></i><span>连接中</span></span>
+              <span id="currentProjectName" class="composer-project">选择项目</span>
+            </span>
+            <div class="composer-actions">
+              <button id="skillButton" type="button" class="skill-button" aria-label="技能" title="技能">⌘</button>
+              <button id="interruptButton" type="button" class="stop-button" hidden><i></i>停止</button>
+              <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="Codex 工作模式">
+                <button type="button" data-mode="default" role="radio">执行</button>
+                <button type="button" data-mode="plan" role="radio">规划</button>
+              </div>
+              <button id="sendButton" type="submit" class="send-button" aria-label="发送">↑</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section id="threadsView" class="view" data-view="threads">
+        <div class="section-head"><div><p class="eyebrow">HISTORY</p></div><button id="mobileNewThreadButton" class="icon-button" aria-label="新建会话" title="新建会话">+</button></div>
+        <div id="mobileThreadList" class="thread-list mobile"></div>
+      </section>
+
+      <section id="artifactsView" class="view" data-view="artifacts">
+        <div class="section-head"><div><p class="eyebrow">OUTPUTS</p></div><button id="refreshArtifactsButton" class="text-button">刷新</button></div>
+        <input id="artifactSearch" class="artifact-search" type="search" placeholder="搜索文件名或路径" autocomplete="off" enterkeyhint="search">
+        <div id="artifactList" class="artifact-list"></div>
+      </section>
+
+      <section id="projectsView" class="view" data-view="projects">
+        <div class="section-head"><div><p class="eyebrow">WORKSPACES</p><h2>选择项目</h2></div></div>
+        <button id="projectUpButton" class="path-button" hidden>← 返回上一级</button>
+        <p id="projectPath" class="project-path"></p>
+        <div id="projectList" class="project-list"></div>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="主导航">
+      <button data-tab="threads"><span>≡</span><small>会话</small></button>
+      <button data-tab="artifacts"><span>◇</span><small>产出物</small><i id="artifactBadge" hidden></i></button>
+      <button data-tab="chat" class="active nav-primary"><span>◒</span><small>控制</small></button>
+      <button data-tab="projects"><span>⌁</span><small>项目</small></button>
+      <button id="settingsButton" class="nav-settings" aria-label="设置" title="设置"><span>⚙</span><small>设置</small></button>
+    </nav>
+    <div id="fullscreenPopover" class="fullscreen-popover" hidden>
+      <button id="fullscreenButton" type="button" aria-label="全屏" title="全屏" aria-pressed="false"><i>⛶</i><span>全屏</span></button>
+    </div>
+  </div>
+
+  <dialog id="settingsSheet" class="settings-dialog">
+    <header><strong>设置</strong><button id="closeSettingsButton" class="icon-button" aria-label="关闭设置">×</button></header>
+    <div class="settings-body">
+      <div id="modeNotice" class="mode-notice" role="status"></div>
+      <label><span>模型</span><select id="modelSelect" aria-label="模型"></select></label>
+      <label><span>强度</span><select id="effortSelect" aria-label="推理强度">
+        <option value="low">Low</option><option value="medium">Medium</option>
+        <option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option>
+      </select></label>
+      <label><span>审批</span><select id="approvalReviewerSelect" aria-label="权限审批方式">
+        <option value="never">从不问我</option><option value="auto_review">模型决定</option><option value="user">每次问我</option>
+      </select></label>
+      <p id="settingsRuntime" class="settings-runtime"></p>
+    </div>
+  </dialog>
+
+  <dialog id="skillSheet" class="settings-dialog">
+    <header><strong>技能</strong><button id="closeSkillButton" class="icon-button" aria-label="关闭技能">×</button></header>
+    <div id="skillList" class="skill-list"></div>
+  </dialog>
+
+  <dialog id="previewDialog" class="preview-dialog">
+    <header><div><small id="previewKind"></small><strong id="previewTitle"></strong></div><button id="closePreviewButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div id="previewBody" class="preview-body"></div>
+    <footer><button id="modifyArtifactButton" class="button">让 Codex 修改</button><a id="downloadArtifactButton" class="button primary" download>下载</a></footer>
+  </dialog>
+
+  <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

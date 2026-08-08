@@ -1,0 +1,30 @@
+[Unit]
+Description=Codex Mobile private PWA gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ningmengchang
+Group=ningmengchang
+WorkingDirectory=/opt/codex-mobile
+Environment=HOME=/home/ningmengchang
+Environment=CODEX_HOME=/home/ningmengchang/.codex
+Environment=CODEX_MOBILE_CODEX_BIN=/opt/codex-mobile/bin/codex
+Environment=CODEX_MOBILE_HOST=127.0.0.1
+Environment=CODEX_MOBILE_PORT=3765
+Environment=CODEX_MOBILE_ALLOWED_ROOTS=/home/ningmengchang/ideaProjects
+Environment=CODEX_MOBILE_DATA_DIR=/var/lib/codex-mobile
+Environment=CODEX_MOBILE_CACHE_DIR=/var/cache/codex-mobile
+EnvironmentFile=-/etc/codex-mobile.env
+ExecStart=/usr/bin/node /opt/codex-mobile/server/index.mjs
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=20
+UMask=0022
+StateDirectory=codex-mobile
+CacheDirectory=codex-mobile
+
+[Install]
+WantedBy=multi-user.target

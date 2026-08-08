@@ -1,0 +1,13 @@
+{
+  "name": "Codex 随行",
+  "short_name": "Codex 随行",
+  "description": "通过 SSH 隧道控制远程 Codex",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0d10",
+  "theme_color": "#101318",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

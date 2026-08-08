@@ -1,0 +1,5 @@
+.DS_Store
+coverage/
+*.log
+.codex-mobile-test/
+
