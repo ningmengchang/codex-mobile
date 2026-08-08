@@ -87,7 +87,54 @@ function setConnection(status, label) {
 }
 
 function isFullscreenActive() {
-  return Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+  return Boolean(document.fullscreenElement || document.webkitFullscreenElement || isDisplayModeFullscreen());
+}
+
+function isDisplayModeFullscreen() {
+  return window.matchMedia?.('(display-mode: fullscreen)')?.matches === true;
+}
+
+let autoFullscreenFallbackBound = false;
+
+function autoFullscreenFallback(event) {
+  if (event.target.closest?.('#fullscreenButton')) return;
+  unbindAutoFullscreenFallback();
+  enterFullscreen();
+}
+
+function unbindAutoFullscreenFallback() {
+  if (!autoFullscreenFallbackBound) return;
+  autoFullscreenFallbackBound = false;
+  document.removeEventListener('pointerdown', autoFullscreenFallback, true);
+  document.removeEventListener('touchstart', autoFullscreenFallback, true);
+  document.removeEventListener('keydown', autoFullscreenFallback, true);
+}
+
+function bindAutoFullscreenFallback() {
+  if (autoFullscreenFallbackBound) return;
+  autoFullscreenFallbackBound = true;
+  document.addEventListener('pointerdown', autoFullscreenFallback, { capture: true });
+  document.addEventListener('touchstart', autoFullscreenFallback, { capture: true });
+  document.addEventListener('keydown', autoFullscreenFallback, { capture: true });
+}
+
+function enterFullscreen() {
+  const enter = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+  if (!enter) {
+    toast('当前浏览器不支持全屏，添加到主屏幕可获得接近全屏体验');
+    return Promise.resolve(false);
+  }
+  return Promise.resolve(enter.call(document.documentElement)).then(() => {
+    unbindAutoFullscreenFallback();
+    return true;
+  }).catch(() => false);
+}
+
+function tryAutoFullscreen() {
+  if (isFullscreenActive()) return;
+  enterFullscreen().then((ok) => {
+    if (!ok) bindAutoFullscreenFallback();
+  });
 }
 
 function updateFullscreenButton() {
@@ -95,45 +142,24 @@ function updateFullscreenButton() {
   if (!button) return;
   const active = isFullscreenActive();
   const icon = button.querySelector('i');
-  const label = button.querySelector('span');
   if (icon) icon.textContent = active ? '⤢' : '⛶';
-  if (label) label.textContent = active ? '退出全屏' : '全屏';
   button.setAttribute('aria-label', active ? '退出全屏' : '全屏');
   button.setAttribute('title', active ? '退出全屏' : '全屏');
   button.setAttribute('aria-pressed', String(active));
   document.body.classList.toggle('fullscreen-active', active);
 }
 
-let fullscreenPressTimer = null;
-let fullscreenPopoverTimer = null;
-let suppressControlClick = false;
-
-function openFullscreenPopover() {
-  const popover = $('#fullscreenPopover');
-  if (!popover) return;
-  popover.hidden = false;
-  clearTimeout(fullscreenPopoverTimer);
-  fullscreenPopoverTimer = setTimeout(closeFullscreenPopover, 3000);
-}
-
-function closeFullscreenPopover() {
-  const popover = $('#fullscreenPopover');
-  if (popover) popover.hidden = true;
-  clearTimeout(fullscreenPopoverTimer);
-}
-
 function toggleFullscreen() {
-  if (isFullscreenActive()) {
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
     if (exit) exit.call(document);
     return;
   }
-  const enter = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
-  if (enter) {
-    enter.call(document.documentElement);
-  } else {
-    toast('当前浏览器不支持全屏，添加到主屏幕可获得接近全屏体验');
+  if (isDisplayModeFullscreen()) {
+    toast('全屏模式下请用系统手势退出（下拉状态栏）');
+    return;
   }
+  enterFullscreen();
 }
 
 let uiStateTimer = null;
@@ -184,6 +210,7 @@ async function initialize() {
   await loadBootstrap();
   await restoreUiState().catch((error) => toast(error.message, 'error'));
   connectEvents();
+  tryAutoFullscreen();
 }
 
 async function loadBootstrap() {
@@ -1350,32 +1377,7 @@ $('#promptInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && window.innerWidth > 780) sendPrompt(event);
 });
 $('#interruptButton').addEventListener('click', interruptTurn);
-$('#fullscreenButton').addEventListener('click', (event) => {
-  event.stopPropagation();
-  suppressControlClick = false;
-  toggleFullscreen();
-  closeFullscreenPopover();
-});
-document.addEventListener('pointerdown', (event) => {
-  if (!event.target.closest('#fullscreenPopover')) closeFullscreenPopover();
-});
-const controlButton = document.querySelector('.bottom-nav button.nav-primary');
-if (controlButton) {
-  const cancelFullscreenPress = () => clearTimeout(fullscreenPressTimer);
-  controlButton.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    clearTimeout(fullscreenPressTimer);
-    suppressControlClick = false;
-    fullscreenPressTimer = setTimeout(() => {
-      suppressControlClick = true;
-      openFullscreenPopover();
-    }, 450);
-  });
-  controlButton.addEventListener('pointermove', cancelFullscreenPress);
-  controlButton.addEventListener('pointerup', cancelFullscreenPress);
-  controlButton.addEventListener('pointercancel', cancelFullscreenPress);
-  controlButton.addEventListener('pointerleave', cancelFullscreenPress);
-}
+$('#fullscreenButton').addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenButton);
 document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
 $$('#modeSwitch button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.mode)));
@@ -1437,10 +1439,6 @@ $('#projectUpButton').addEventListener('click', () => browseProjects(state.proje
 $('#closePreviewButton').addEventListener('click', () => $('#previewDialog').close());
 $('#modifyArtifactButton').addEventListener('click', modifyCurrentArtifact);
 $$('.bottom-nav button').forEach((button) => button.addEventListener('click', () => {
-  if (suppressControlClick) {
-    suppressControlClick = false;
-    return;
-  }
   if (button.dataset.tab) showTab(button.dataset.tab);
 }));
 

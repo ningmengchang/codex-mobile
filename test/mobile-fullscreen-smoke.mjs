@@ -52,78 +52,68 @@ try {
     return route.fulfill({ status: 200, contentType, body: fs.readFileSync(file) });
   });
 
-  const control = () => page.locator('.bottom-nav button.nav-primary');
-  const popoverVisible = () => page.evaluate(() => !document.querySelector('#fullscreenPopover').hidden);
-  const activeTab = () => page.evaluate(() => document.querySelector('.bottom-nav button.active')?.dataset.tab);
-  const longPress = async () => {
-    await control().dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, pointerId: 1 });
-    await page.waitForTimeout(550);
-    await control().dispatchEvent('pointerup', { pointerType: 'touch', button: 0, pointerId: 1 });
-  };
+  const activeState = () => page.evaluate(() => ({
+    fullscreen: Boolean(document.fullscreenElement || document.webkitFullscreenElement),
+    bodyClass: document.body.classList.contains('fullscreen-active'),
+    pressed: document.querySelector('#fullscreenButton').getAttribute('aria-pressed'),
+  }));
 
   await page.goto('http://127.0.0.1:39896/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('#fullscreenPopover').waitFor({ state: 'attached', timeout: 5_000 });
+  await page.locator('#fullscreenButton').waitFor({ state: 'attached', timeout: 5_000 });
 
-  // 1) 初始：输入区没有全屏按钮，popover 隐藏
-  const initial = await page.evaluate(() => ({
-    popoverHidden: document.querySelector('#fullscreenPopover').hidden,
-    composerHasButton: Boolean(document.querySelector('.composer-meta #fullscreenButton')),
-  }));
-  if (!initial.popoverHidden || initial.composerHasButton) throw new Error(`初始状态异常：${JSON.stringify(initial)}`);
-
-  // 2) 长按控制按钮 → popover 出现
-  await longPress();
-  if (!(await popoverVisible())) throw new Error('长按后 popover 未出现');
-  const position = await page.evaluate(() => {
-    const popover = document.querySelector('#fullscreenPopover').getBoundingClientRect();
-    const jump = document.querySelector('#jumpQuestionButton').getBoundingClientRect();
-    return { popoverBottom: Math.round(popover.bottom), jumpTop: Math.round(jump.top), above: popover.bottom < jump.top };
+  // 0) manifest 声明安装态全屏
+  const manifest = await page.evaluate(async () => {
+    const response = await fetch('/manifest.webmanifest');
+    return await response.json();
   });
-  if (!position.above) throw new Error(`全屏按钮未在上一问题上方：${JSON.stringify(position)}`);
-  const pressedAfterOpen = await page.evaluate(() => document.querySelector('#fullscreenButton').getAttribute('aria-pressed'));
-  if (pressedAfterOpen !== 'false') throw new Error(`打开时状态异常：${pressedAfterOpen}`);
+  if (!Array.isArray(manifest.display_override) || !manifest.display_override.includes('fullscreen')) {
+    throw new Error(`manifest 缺少 display_override fullscreen：${JSON.stringify(manifest)}`);
+  }
 
-  // 3) 点击全屏按钮 → 进入全屏且 popover 收起
+  // 1) 按钮常驻右侧、“上一问题”上方；无长按弹层
+  const position = await page.evaluate(() => {
+    const button = document.querySelector('#fullscreenButton').getBoundingClientRect();
+    const jumpButton = document.querySelector('#jumpQuestionButton');
+    const hiddenBefore = jumpButton.hidden;
+    jumpButton.hidden = false;
+    const jump = jumpButton.getBoundingClientRect();
+    jumpButton.hidden = hiddenBefore;
+    return {
+      buttonRight: Math.round(button.right),
+      viewportWidth: innerWidth,
+      buttonTop: Math.round(button.top),
+      jumpTop: Math.round(jump.top),
+      popoverGone: !document.querySelector('#fullscreenPopover'),
+    };
+  });
+  if (position.popoverGone !== true) throw new Error(`弹层未移除：${JSON.stringify(position)}`);
+  if (position.buttonRight > position.viewportWidth) throw new Error(`按钮超出右边界：${JSON.stringify(position)}`);
+  if (position.buttonTop >= position.jumpTop) throw new Error(`按钮未在“上一问题”上方：${JSON.stringify(position)}`);
+
+  // 2) 首次任意点按（浏览器限制下）自动进入全屏
+  await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 1 })));
+  await page.waitForTimeout(400);
+  const enteredByFallback = await activeState();
+  if ((!enteredByFallback.fullscreen && !enteredByFallback.bodyClass) || enteredByFallback.pressed !== 'true') {
+    throw new Error(`首次点按未进入全屏：${JSON.stringify(enteredByFallback)}`);
+  }
+
+  // 3) 点按钮退出全屏
   await page.locator('#fullscreenButton').click();
   await page.waitForTimeout(300);
-  const entered = await page.evaluate(() => ({
-    fullscreen: Boolean(document.fullscreenElement || document.webkitFullscreenElement),
-    bodyClass: document.body.classList.contains('fullscreen-active'),
-    popoverHidden: document.querySelector('#fullscreenPopover').hidden,
-  }));
-  if ((!entered.fullscreen && !entered.bodyClass) || !entered.popoverHidden) throw new Error(`未进入全屏：${JSON.stringify(entered)}`);
+  const exited = await activeState();
+  if (exited.fullscreen || exited.bodyClass || exited.pressed !== 'false') throw new Error(`未退出全屏：${JSON.stringify(exited)}`);
 
-  // 4) 再次长按并点击 → 退出全屏
-  await longPress();
+  // 4) 再点按钮重新进入，且不会“刚进就退”
   await page.locator('#fullscreenButton').click();
-  await page.waitForTimeout(300);
-  const exited = await page.evaluate(() => ({
-    fullscreen: Boolean(document.fullscreenElement || document.webkitFullscreenElement),
-    bodyClass: document.body.classList.contains('fullscreen-active'),
-    popoverHidden: document.querySelector('#fullscreenPopover').hidden,
-  }));
-  if (exited.fullscreen || exited.bodyClass || !exited.popoverHidden) throw new Error(`未退出全屏：${JSON.stringify(exited)}`);
+  await page.waitForTimeout(400);
+  const reentered = await activeState();
+  if ((!reentered.fullscreen && !reentered.bodyClass) || reentered.pressed !== 'true') {
+    throw new Error(`按钮未能重新进入全屏：${JSON.stringify(reentered)}`);
+  }
 
-  // 5) 长按不切换 tab；短按正常切换
-  await page.locator('button[data-tab="artifacts"]').click();
-  await page.waitForTimeout(100);
-  await longPress();
-  if ((await activeTab()) !== 'artifacts') throw new Error('长按不应切换 tab');
-  if (!(await popoverVisible())) throw new Error('产出物页长按后 popover 未出现');
-  await page.evaluate(() => document.querySelector('.bottom-nav button.nav-primary').click());
-  if ((await activeTab()) !== 'artifacts') throw new Error('长按后的点击应被抑制');
-  await page.locator('.bottom-nav button.nav-primary').click();
-  if ((await activeTab()) !== 'chat') throw new Error('短按未正常切换');
-  if (await popoverVisible()) throw new Error('短按不应显示 popover');
-
-  // 6) 长按后 3 秒自动隐藏
-  await longPress();
-  if (!(await popoverVisible())) throw new Error('长按后 popover 未出现');
-  await page.waitForTimeout(3200);
-  if (await popoverVisible()) throw new Error('popover 未自动隐藏');
-
-  process.stdout.write(JSON.stringify({ initial, entered, exited, suppressionOk: true, autoHideOk: true }));
+  process.stdout.write(JSON.stringify({ position, enteredByFallback, exited, reentered }));
 } finally {
   await browser.close();
 }

@@ -56,6 +56,7 @@
         </section>
         <button id="jumpQuestionButton" class="scroll-question" hidden>上一问题 ↑</button>
         <button id="scrollLatestButton" class="scroll-latest" hidden>回到最新 ↓</button>
+        <button id="fullscreenButton" class="fullscreen-float" type="button" aria-label="全屏" title="全屏" aria-pressed="false"><i>⛶</i></button>
         <form id="composer" class="composer">
           <div id="mentionTray" class="mention-tray"></div>
           <textarea id="promptInput" rows="1" enterkeyhint="send" autocapitalize="sentences" placeholder="告诉 Codex 下一步做什么…"></textarea>
@@ -103,9 +104,6 @@
       <button data-tab="projects"><span>⌁</span><small>项目</small></button>
       <button id="settingsButton" class="nav-settings" aria-label="设置" title="设置"><span>⚙</span><small>设置</small></button>
     </nav>
-    <div id="fullscreenPopover" class="fullscreen-popover" hidden>
-      <button id="fullscreenButton" type="button" aria-label="全屏" title="全屏" aria-pressed="false"><i>⛶</i><span>全屏</span></button>
-    </div>
   </div>
 
   <dialog id="settingsSheet" class="settings-dialog">
