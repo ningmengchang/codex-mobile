@@ -56,9 +56,9 @@ try {
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
   await page.waitForTimeout(300);
 
-  // 1) 按钮顺序：会话 | 产出物 | 控制 | 项目 | 设置
+  // 1) 按钮顺序：会话 | 收藏 | 控制 | 产出物 | 项目 | 设置
   const labels = await page.locator('.bottom-nav button small').allTextContents();
-  const expected = ['会话', '产出物', '控制', '项目', '设置'];
+  const expected = ['会话', '收藏', '控制', '产出物', '项目', '设置'];
   if (JSON.stringify(labels) !== JSON.stringify(expected)) {
     throw new Error(`底部按钮顺序错误：${labels.join('、')}`);
   }
@@ -67,21 +67,27 @@ try {
   const primary = await page.evaluate(() => {
     const button = document.querySelector('.bottom-nav button.nav-primary');
     const rect = button.getBoundingClientRect();
+    const other = document.querySelector('.bottom-nav button:not(.nav-primary)').getBoundingClientRect();
     const transform = getComputedStyle(button).transform;
     const background = getComputedStyle(button).backgroundColor;
     return {
       height: Math.round(rect.height),
       width: Math.round(rect.width),
+      otherHeight: Math.round(other.height),
+      otherWidth: Math.round(other.width),
       centerX: Math.round(rect.left + rect.width / 2),
       viewportWidth: innerWidth,
       transform,
       background,
     };
   });
-  if (!primary.transform.includes('-8') || primary.height < 44) {
-    throw new Error(`控制按钮未凸起：${JSON.stringify(primary)}`);
+  if (Math.abs(primary.height - primary.otherHeight) > 2 || Math.abs(primary.width - primary.otherWidth) > 2) {
+    throw new Error(`控制按钮尺寸未与其他按钮一致：${JSON.stringify(primary)}`);
   }
-  if (Math.abs(primary.centerX - primary.viewportWidth / 2) > 2) {
+  if (primary.transform !== 'none' && primary.transform.includes('-8')) {
+    throw new Error(`控制按钮仍存在凸起位移：${JSON.stringify(primary)}`);
+  }
+  if (Math.abs(primary.centerX - primary.viewportWidth / 6 * 2.5) > 2) {
     throw new Error(`控制按钮未居中：${JSON.stringify(primary)}`);
   }
   if (primary.background === 'rgba(0, 0, 0, 0)') {
@@ -100,7 +106,7 @@ try {
       dock: Math.round(composer.bottom - primary.top),
     };
   });
-  if (dock.dock < 4 || dock.dock > 8) throw new Error(`控制按钮未贴边嵌入：${JSON.stringify(dock)}`);
+  if (Math.abs(dock.dock) > 1) throw new Error(`控制按钮未与其他按钮对齐：${JSON.stringify(dock)}`);
   if (dock.primaryTop < dock.textareaBottom - 1) throw new Error(`控制按钮遮挡输入文字：${JSON.stringify(dock)}`);
 
   // 4) 切换交互正常

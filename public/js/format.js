@@ -1,3 +1,6 @@
+import { marked } from '../vendor/marked.esm.js';
+import DOMPurify from '../vendor/purify.js';
+
 export const escapeAttribute = typeof CSS !== 'undefined' && CSS.escape
   ? (value) => CSS.escape(String(value))
   : (value) => String(value).replace(/"/g, '\\"');
@@ -8,24 +11,32 @@ export function escapeHtml(value) {
   })[character]);
 }
 
+const MERMAID_SOURCES = new Map();
+let mermaidSequence = 0;
+
+function mermaidPlaceholder(source) {
+  const id = `mermaid-${++mermaidSequence}`;
+  MERMAID_SOURCES.set(id, source.trim());
+  return `<div class="mermaid-block" data-mermaid-id="${id}"><div class="mermaid-loading">正在渲染流程图…</div><pre class="mermaid-fallback" hidden>${escapeHtml(source.trim())}</pre></div>`;
+}
+
+export function getMermaidSource(id) {
+  return MERMAID_SOURCES.get(id);
+}
+
+export function releaseMermaidSource(id) {
+  MERMAID_SOURCES.delete(id);
+}
+
 export function markdown(value) {
-  let text = escapeHtml(value);
-  const blocks = [];
-  text = text.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_match, language, code) => {
-    const index = blocks.push(`<pre><code data-language="${escapeHtml(language.trim())}">${code}</code></pre>`) - 1;
-    return `\u0000BLOCK${index}\u0000`;
+  const raw = String(value ?? '');
+  const source = raw.replace(/```mermaid[^\n]*\n([\s\S]*?)```/g, (_match, code) => mermaidPlaceholder(code));
+  const html = marked.parse(source);
+  const safe = DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    ADD_ATTR: ['data-mermaid-id'],
   });
-  text = text
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/^[-*] (.+)$/gm, '• $1')
-    .split(/\n{2,}/)
-    .map((part) => part.startsWith('\u0000BLOCK') || /^<h[1-3]>/.test(part) ? part : `<p>${part.replace(/\n/g, '<br>')}</p>`)
-    .join('');
-  return text.replace(/\u0000BLOCK(\d+)\u0000/g, (_match, index) => blocks[Number(index)]);
+  return safe.replace(/<table>([\s\S]*?)<\/table>/g, '<div class="markdown-table-wrap"><table class="markdown-table">$1</table></div>');
 }
 
 export function formatBytes(bytes) {
@@ -47,6 +58,17 @@ export function formatTime(seconds) {
   return date.toDateString() === today.toDateString()
     ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
     : date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+export function formatDateTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const time = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return date.toDateString() === today.toDateString()
+    ? time
+    : `${date.getMonth() + 1}-${date.getDate()} ${time}`;
 }
 
 export function formatTurnTime(seconds) {

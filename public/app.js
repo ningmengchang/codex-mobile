@@ -1,12 +1,15 @@
 import { $, $$, toast } from './js/dom.js';
 import { api, post } from './js/http.js';
-import { escapeHtml, markdown, formatBytes, formatTime, escapeAttribute } from './js/format.js';
+import { escapeHtml, markdown, formatBytes, formatTime, formatDateTime, escapeAttribute } from './js/format.js';
+import { renderMermaid } from './js/mermaid-renderer.js';
+import { initKeyboardInsets } from './js/keyboard.js';
+import { initDingtalk, loadDingtalkMessages, startDingtalkPolling, stopDingtalkPolling } from './js/dingtalk.js';
+import { debug } from './js/debug.js';
 import {
   state,
   UI_STATE,
   DELIVERABLE_KINDS,
   DELIVERABLE_KEYWORDS,
-  PINNED_ARTIFACTS_KEY,
   ARTIFACT_OTHER_PAGE,
   ARTIFACT_OTHER_STEP,
 } from './js/state.js';
@@ -191,7 +194,10 @@ async function restoreUiState() {
     localStorage.removeItem(UI_STATE.thread);
     sessionStorage.removeItem(UI_STATE.draft);
   }
-  if (['chat', 'threads', 'artifacts', 'projects'].includes(savedTab)) showTab(savedTab);
+  const activeView = document.querySelector('.view.active')?.dataset.view;
+  if (['chat', 'threads', 'artifacts', 'projects', 'favorites'].includes(savedTab) && savedTab !== activeView) {
+    showTab(savedTab);
+  }
   const input = $('#promptInput');
   if (savedDraft && state.currentThread?.id === savedThreadId) {
     input.value = savedDraft;
@@ -258,13 +264,43 @@ function setMode(mode) {
   return true;
 }
 
-async function selectProject(projectPath, switchToChat = true) {
+async function selectProject(projectPath, userInitiated = true) {
   try {
     state.currentProject = projectPath;
     localStorage.setItem('codex-mobile-project', projectPath);
     $('#currentProjectName').textContent = projectPath.split('/').filter(Boolean).at(-1) || projectPath;
+    if (userInitiated) {
+      state.currentThread = null;
+      state.turns = [];
+      state.turnsNextCursor = null;
+      state.activeTurnId = null;
+      state.pendingTurnMode = null;
+      state.turnModes.clear();
+      state.questionCursor = 0;
+      state.selectedMentions = [];
+      state.currentArtifact = null;
+      localStorage.removeItem(UI_STATE.thread);
+      setArtifacts([]);
+      state.timelineVersion += 1;
+      renderMentions();
+      renderArtifacts();
+      renderTimeline();
+      updateScrollLatestButton();
+      updateLoadOlderButton();
+    }
     await loadThreads();
-    if (switchToChat) showTab('chat');
+    if (userInitiated) {
+      if (state.pendingCodexMessage) {
+        const draft = state.pendingCodexMessage;
+        state.pendingCodexMessage = null;
+        showTab('chat');
+        $('#promptInput').value = draft;
+        resizeComposer();
+        $('#promptInput').focus();
+      } else {
+        showTab('threads');
+      }
+    }
   } catch (error) {
     state.currentProject = state.bootstrap?.projects?.current?.path ?? null;
     toast(error.message, 'error');
@@ -304,6 +340,168 @@ async function loadThreads() {
   renderThreads();
 }
 
+const FAVORITES_KEY = 'codex-mobile-favorite-threads';
+
+function favoriteThreads() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavoriteThreads(items) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(items.slice(0, 50)));
+}
+
+function isThreadFavorite(threadId) {
+  return favoriteThreads().some((item) => item.id === threadId);
+}
+
+function toggleThreadFavorite(thread) {
+  const current = favoriteThreads();
+  const index = current.findIndex((item) => item.id === thread.id);
+  if (index >= 0) {
+    current.splice(index, 1);
+    toast('已取消收藏');
+  } else {
+    current.unshift({
+      id: thread.id,
+      name: thread.name || thread.preview || '未命名会话',
+      cwd: thread.cwd || state.currentProject,
+      updatedAt: thread.updatedAt,
+    });
+    toast('已收藏');
+  }
+  saveFavoriteThreads(current);
+  renderThreads();
+  renderFavorites();
+}
+
+async function openFavoriteThread(favorite) {
+  state.currentProject = favorite.cwd || state.currentProject;
+  localStorage.setItem('codex-mobile-project', state.currentProject);
+  $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
+  try {
+    await openThread(favorite.id);
+    await loadThreads();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function renderFavorites() {
+  const list = $('#favoriteList');
+  if (!list) return;
+  list.replaceChildren();
+  const favorites = favoriteThreads().sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  if (!favorites.length) {
+    list.innerHTML = '<div class="empty-list">还没有收藏的会话。<br>在会话列表点 ☆ 即可收藏。</div>';
+    return;
+  }
+  for (const favorite of favorites) {
+    const item = document.createElement('div');
+    item.className = `thread-item ${state.currentThread?.id === favorite.id ? 'active' : ''}`;
+    const name = favorite.name || '未命名会话';
+    item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(favorite.cwd ?? '')}</small></span><button type="button" class="thread-star on" aria-label="取消收藏" title="取消收藏">★</button>`;
+    item.addEventListener('click', (event) => {
+      if (event.target.closest('.thread-star')) {
+        const current = favoriteThreads().filter((entry) => entry.id !== favorite.id);
+        saveFavoriteThreads(current);
+        toast('已取消收藏');
+        renderThreads();
+        renderFavorites();
+        return;
+      }
+      openFavoriteThread(favorite);
+    });
+    list.append(item);
+  }
+}
+
+function openThreadActionDialog(thread) {
+  state.threadAction = thread;
+  $('#threadDeleteConfirm').hidden = true;
+  $('#threadDeleteName').textContent = thread.name || thread.preview || '未命名会话';
+  $('#threadActionDialog').showModal();
+}
+
+function closeThreadActionDialog() {
+  $('#threadActionDialog').close();
+  state.threadAction = null;
+}
+
+function openThreadRenameDialog() {
+  const thread = state.threadAction;
+  if (!thread) return;
+  $('#threadActionDialog').close();
+  $('#threadRenameInput').value = thread.name || thread.preview || '';
+  $('#threadRenameDialog').showModal();
+  requestAnimationFrame(() => $('#threadRenameInput').focus());
+}
+
+async function confirmThreadRename() {
+  const thread = state.threadAction;
+  if (!thread) return;
+  const name = $('#threadRenameInput').value.trim();
+  if (!name) {
+    toast('名称不能为空', 'error');
+    return;
+  }
+  try {
+    await post(`/api/threads/${encodeURIComponent(thread.id)}/name`, { name });
+    thread.name = name;
+    if (state.currentThread?.id === thread.id) state.currentThread.name = name;
+    const index = state.threads.findIndex((item) => item.id === thread.id);
+    if (index >= 0) state.threads[index] = { ...state.threads[index], name };
+    const favorites = favoriteThreads().map((entry) => entry.id === thread.id ? { ...entry, name, updatedAt: Date.now() } : entry);
+    saveFavoriteThreads(favorites);
+    $('#threadRenameDialog').close();
+    state.threadAction = null;
+    renderThreads();
+    renderFavorites();
+    toast('已重命名');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function confirmThreadDelete() {
+  if (!state.threadAction) return;
+  $('#threadDeleteConfirm').hidden = false;
+}
+
+async function confirmThreadDeleteOk() {
+  const thread = state.threadAction;
+  if (!thread) return;
+  try {
+    await post(`/api/threads/${encodeURIComponent(thread.id)}/delete`, {});
+    state.threads = state.threads.filter((item) => item.id !== thread.id);
+    saveFavoriteThreads(favoriteThreads().filter((entry) => entry.id !== thread.id));
+    if (state.currentThread?.id === thread.id) {
+      state.currentThread = null;
+      state.turns = [];
+      state.turnsNextCursor = null;
+      state.activeTurnId = null;
+      state.timelineVersion += 1;
+      localStorage.removeItem(UI_STATE.thread);
+      renderTimeline();
+      renderThreads();
+      renderFavorites();
+      saveUiState();
+    } else {
+      renderThreads();
+      renderFavorites();
+    }
+    $('#threadActionDialog').close();
+    state.threadAction = null;
+    toast('会话已删除');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 function renderThreads() {
   for (const list of [$('#desktopThreadList'), $('#mobileThreadList')]) {
     list.replaceChildren();
@@ -312,13 +510,24 @@ function renderThreads() {
       continue;
     }
     for (const thread of state.threads) {
-      const button = document.createElement('button');
-      button.className = `thread-item ${state.currentThread?.id === thread.id ? 'active' : ''}`;
+      const item = document.createElement('div');
+      item.className = `thread-item ${state.currentThread?.id === thread.id ? 'active' : ''}`;
       const title = thread.name || thread.preview || '未命名会话';
       const status = typeof thread.status === 'string' ? thread.status : Object.keys(thread.status ?? {})[0] ?? '';
-      button.innerHTML = `<strong>${escapeHtml(title)}</strong><small>${escapeHtml(formatTime(thread.updatedAt))} · ${escapeHtml(status)}</small>`;
-      button.addEventListener('click', () => openThread(thread.id));
-      list.append(button);
+      const starred = isThreadFavorite(thread.id);
+      item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(formatTime(thread.updatedAt))} · ${escapeHtml(status)}</small></span><button type="button" class="thread-star${starred ? ' on' : ''}" aria-label="${starred ? '取消收藏' : '收藏'}" title="${starred ? '取消收藏' : '收藏'}">${starred ? '★' : '☆'}</button><button type="button" class="thread-more" aria-label="会话操作" title="会话操作">⋯</button>`;
+      item.addEventListener('click', (event) => {
+        if (event.target.closest('.thread-star')) {
+          toggleThreadFavorite(thread);
+          return;
+        }
+        if (event.target.closest('.thread-more')) {
+          openThreadActionDialog(thread);
+          return;
+        }
+        openThread(thread.id);
+      });
+      list.append(item);
     }
   }
 }
@@ -383,6 +592,7 @@ function applyThreadData(thread, turns, seq = state.threadLoadSeq) {
 }
 
 async function openThread(threadId) {
+  debug.log('thread', 'open-start', { threadId });
   const seq = ++state.threadLoadSeq;
   showTab('chat');
   const cached = state.threadCache.get(threadId);
@@ -391,6 +601,7 @@ async function openThread(threadId) {
     renderArtifacts();
     state.turnsNextCursor = cached.turnsNextCursor ?? null;
     applyThreadData(cached.thread, cached.turns, seq);
+    state.threadOpenedAt = Date.now();
     updateLoadOlderButton();
     post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
     refreshCurrentThread({ seq }).catch(() => {});
@@ -421,10 +632,19 @@ async function openThread(threadId) {
     applyThreadData(read.thread, turns, seq);
     updateLoadOlderButton();
     post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
-    loadArtifacts(threadId).then(() => {
+    try {
+      await loadArtifacts(threadId);
       const entry = state.threadCache.get(threadId);
       if (entry && state.currentThread?.id === threadId) entry.artifacts = state.artifacts.slice();
-    }).catch((error) => toast(error.message, 'error'));
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      if (seq === state.threadLoadSeq) {
+        hideThreadLoading();
+        state.threadOpenedAt = Date.now();
+        debug.log('thread', 'open-complete', { threadId });
+      }
+    }
   } catch (error) {
     if (seq === state.threadLoadSeq) {
       hideThreadLoading();
@@ -546,6 +766,14 @@ function handleCodex(message) {
   const threadId = params.threadId ?? params.thread_id ?? params.thread?.id;
   const turnId = params.turnId ?? params.turn_id;
   const itemId = params.itemId ?? params.item_id;
+  if (state.threadOpenedAt && message.at) {
+    const eventAt = typeof message.at === 'number' ? message.at : Date.parse(message.at);
+    if (Number.isFinite(eventAt) && eventAt < state.threadOpenedAt) {
+      debug.log('sse', 'ignored-old', { method, at: message.at });
+      return;
+    }
+  }
+  debug.log('sse', 'process', { method, threadId });
   if (method === 'thread/started' && params.thread?.cwd === state.currentProject) loadThreads().catch(() => {});
   if (!state.currentThread || threadId !== state.currentThread.id) return;
   if (method === 'turn/started') {
@@ -786,53 +1014,39 @@ async function loadArtifacts(expectedThreadId = state.currentThread?.id) {
   refreshTimelineAfterArtifacts();
 }
 
-function artifactPinKey(artifact) {
-  return `${artifact.threadId ?? 'thread'}:${artifact.relativePath ?? artifact.name ?? artifact.id ?? ''}`;
-}
-
-function pinnedArtifactKeys() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(PINNED_ARTIFACTS_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function toggleArtifactPin(artifact) {
-  const key = artifactPinKey(artifact);
-  const current = pinnedArtifactKeys();
-  const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
-  localStorage.setItem(PINNED_ARTIFACTS_KEY, JSON.stringify(next));
-  renderArtifacts();
-}
-
-function rankArtifacts(artifacts, pinnedKeys) {
+function rankArtifacts(artifacts) {
   return artifacts.map((artifact) => ({
     artifact,
-    pinned: pinnedKeys.has(artifactPinKey(artifact)),
     deliverable: isDeliverableArtifact(artifact),
   })).sort((a, b) => {
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     if (a.deliverable !== b.deliverable) return a.deliverable ? -1 : 1;
     return artifactSortTime(b.artifact) - artifactSortTime(a.artifact);
   });
 }
 
-function createArtifactCard(artifact, pinnedKeys) {
+function artifactKindLabel(kind) {
+  const labels = {
+    markdown: 'MD', pdf: 'PDF', office: 'OFFICE', image: 'IMG', text: 'TXT',
+    html: 'HTML', audio: 'AUDIO', video: 'VIDEO', archive: 'ZIP', binary: 'FILE',
+  };
+  return labels[kind] ?? String(kind || 'file').toUpperCase().slice(0, 6);
+}
+
+function createArtifactCard(artifact) {
   const card = document.createElement('article');
-  const pinned = pinnedKeys.has(artifactPinKey(artifact));
-  card.className = `artifact-card ${artifact.available ? '' : 'deleted'}${pinned ? ' pinned' : ''}`;
-  card.innerHTML = `<span class="file-icon">${escapeHtml(artifact.fileKind.slice(0, 4))}</span><div><strong>${escapeHtml(artifact.name)}</strong><small>${escapeHtml(artifact.status)} · ${escapeHtml(artifact.relativePath)}</small></div><div class="artifact-actions"><button type="button" class="pin-button${pinned ? ' pinned' : ''}" data-action="pin" data-artifact-id="${escapeHtml(artifact.id)}" aria-pressed="${pinned}" title="${pinned ? '取消置顶' : '置顶'}">📌</button><button data-action="preview" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>预览</button></div>`;
+  const modifiedText = formatDateTime(artifact.modifiedAt || artifact.capturedAt);
+  card.className = `artifact-card ${artifact.available ? '' : 'deleted'}`;
+  card.innerHTML = `
+    <div class="artifact-card-main"><strong title="${escapeHtml(artifact.name)}">${escapeHtml(artifact.name)}</strong><span class="artifact-kind">${escapeHtml(artifactKindLabel(artifact.fileKind))}</span></div>
+    ${modifiedText ? `<small class="artifact-time">修改于 ${escapeHtml(modifiedText)}</small>` : ''}
+    <div class="artifact-actions"><button data-action="send-dingtalk" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>发给自己</button><button data-action="preview" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>预览</button></div>`;
   return card;
 }
 
 function renderArtifacts() {
   const list = $('#artifactList');
   const query = state.artifactQuery.trim().toLowerCase();
-  const pinnedArray = pinnedArtifactKeys();
-  const pinnedKeys = new Set(pinnedArray);
-  const renderKey = `${query}|${state.artifactOtherShown}|${pinnedArray.sort().join('\u0001')}`;
+  const renderKey = `${query}|${state.artifactOtherShown}`;
   if (state.artifactsRenderedVersion === state.artifactsVersion && state.artifactsRenderKey === renderKey) return;
   state.artifactsRenderKey = renderKey;
   state.artifactsRenderedVersion = state.artifactsVersion;
@@ -850,11 +1064,10 @@ function renderArtifacts() {
     list.innerHTML = `<div class="empty-list">没有匹配“${escapeHtml(state.artifactQuery.trim())}”的产出物。<br>换个关键词试试。</div>`;
     return;
   }
-  const ranked = rankArtifacts(items, pinnedKeys);
+  const ranked = rankArtifacts(items);
   const groups = [
-    { label: '置顶', match: (entry) => entry.pinned },
-    { label: '文档产出', match: (entry) => !entry.pinned && entry.deliverable },
-    { label: '其他文件', match: (entry) => !entry.pinned && !entry.deliverable },
+    { label: '文档产出', match: (entry) => entry.deliverable },
+    { label: '其他文件', match: (entry) => !entry.deliverable },
   ];
   for (const group of groups) {
     const entries = ranked.filter(group.match);
@@ -864,7 +1077,7 @@ function renderArtifacts() {
     header.textContent = group.label;
     list.append(header);
     const shown = group.label === '其他文件' ? entries.slice(0, state.artifactOtherShown) : entries;
-    for (const entry of shown) list.append(createArtifactCard(entry.artifact, pinnedKeys));
+    for (const entry of shown) list.append(createArtifactCard(entry.artifact));
     if (entries.length > shown.length) {
       const more = document.createElement('button');
       more.type = 'button';
@@ -878,6 +1091,28 @@ function renderArtifacts() {
 
 function refreshTimelineAfterArtifacts() {
   if (document.querySelector('.view.active')?.dataset.view === 'chat') updateTurnArtifactsStrips();
+}
+
+function rewriteArtifactUrls(html, token) {
+  const rewrite = (url) => {
+    const raw = url.trim();
+    let decoded = raw;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {}
+    const trimmed = decoded.replace(/^\.\//, '');
+    if (!trimmed || /^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(trimmed)) return null;
+    return `/api/artifacts/${token}/related?path=${encodeURIComponent(trimmed)}`;
+  };
+  return html
+    .replace(/(<img\b[^>]*\bsrc=")([^"]+)(")/gi, (match, prefix, url, suffix) => {
+      const rewritten = rewrite(url);
+      return rewritten === null ? match : `${prefix}${rewritten}${suffix}`;
+    })
+    .replace(/(<a\b[^>]*\bhref=")([^"]+)(")/gi, (match, prefix, url, suffix) => {
+      const rewritten = rewrite(url);
+      return rewritten === null ? match : `${prefix}${rewritten}${suffix}`;
+    });
 }
 
 async function openArtifact(artifact) {
@@ -903,7 +1138,10 @@ async function openArtifact(artifact) {
         throw new Error(problem.message || '文件读取失败');
       }
       const text = await response.text();
-      body.innerHTML = meta.fileKind === 'markdown' ? `<article class="agent-card">${markdown(text)}</article>` : `<pre>${escapeHtml(text)}</pre>`;
+      body.innerHTML = meta.fileKind === 'markdown'
+        ? `<article class="agent-card">${rewriteArtifactUrls(markdown(text), token)}</article>`
+        : `<pre>${escapeHtml(text)}</pre>`;
+      if (meta.fileKind === 'markdown') void renderMermaid(body).catch(() => toast('流程图渲染失败', 'error'));
     } else if (meta.fileKind === 'image') {
       body.innerHTML = `<img src="${raw}" alt="${escapeHtml(meta.name)}">`;
     } else if (meta.fileKind === 'office' && meta.name.toLowerCase().endsWith('.xlsx')) {
@@ -1147,6 +1385,18 @@ function modifyCurrentArtifact() {
   $('#promptInput').focus();
 }
 
+async function sendArtifactToDingtalk(artifact) {
+  if (!artifact?.token || !artifact.available) return;
+  const confirmed = window.confirm(`确认把「${artifact.name}」发送到钉钉给自己？`);
+  if (!confirmed) return;
+  try {
+    await post(`/api/artifacts/${encodeURIComponent(artifact.token)}/send-dingtalk`, {});
+    toast(`已发送「${artifact.name}」到钉钉`);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 function renderMentions() {
   const tray = $('#mentionTray');
   tray.replaceChildren();
@@ -1280,8 +1530,15 @@ function showTab(name) {
   $$('.view').forEach((view) => view.classList.toggle('active', view.dataset.view === name));
   $$('.bottom-nav button').forEach((button) => button.classList.toggle('active', button.dataset.tab === name));
   if (name === 'chat') renderTimeline(false);
+  if (name === 'favorites') renderFavorites();
   if (name === 'artifacts') loadArtifacts().catch((error) => toast(error.message, 'error'));
   if (name === 'projects' && state.projectBrowser) renderProjects(state.projectBrowser);
+  if (name === 'dingtalk') {
+    loadDingtalkMessages(true).catch((error) => toast(error.message, 'error'));
+    startDingtalkPolling();
+  } else {
+    stopDingtalkPolling();
+  }
   updateJumpButton();
   saveUiState();
 }
@@ -1293,7 +1550,13 @@ function connectEvents() {
   events.onopen = () => {
     setConnection('online', '已连接');
     syncPendingRequests().catch(() => {});
-    if (state.currentThread && !state.activeTurnId) refreshCurrentThread().catch(() => {});
+    const openedRecently = state.threadOpenedAt && Date.now() - state.threadOpenedAt < 1500;
+    if (state.currentThread && !state.activeTurnId && !openedRecently) {
+      debug.log('refresh', 'sse-auto', { openedRecently: false });
+      refreshCurrentThread().catch(() => {});
+    } else {
+      debug.log('refresh', 'sse-skipped', { openedRecently });
+    }
   };
   events.onerror = () => setConnection('offline', '正在重连');
   events.addEventListener('bridge-status', (event) => {
@@ -1373,6 +1636,20 @@ $('#settingsButton').addEventListener('click', () => $('#settingsSheet').showMod
 $('#closeSettingsButton').addEventListener('click', () => $('#settingsSheet').close());
 $('#skillButton').addEventListener('click', openSkillSheet);
 $('#closeSkillButton').addEventListener('click', () => $('#skillSheet').close());
+$('#closeThreadActionButton').addEventListener('click', closeThreadActionDialog);
+$('#threadRenameAction').addEventListener('click', openThreadRenameDialog);
+$('#threadDeleteAction').addEventListener('click', confirmThreadDelete);
+$('#threadDeleteCancel').addEventListener('click', () => { $('#threadDeleteConfirm').hidden = true; });
+$('#threadDeleteOk').addEventListener('click', confirmThreadDeleteOk);
+$('#closeThreadRenameButton').addEventListener('click', () => { $('#threadRenameDialog').close(); state.threadAction = null; });
+$('#threadRenameCancel').addEventListener('click', () => { $('#threadRenameDialog').close(); state.threadAction = null; });
+$('#threadRenameConfirm').addEventListener('click', confirmThreadRename);
+$('#threadRenameInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.isComposing) {
+    event.preventDefault();
+    confirmThreadRename();
+  }
+});
 $('#promptInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && window.innerWidth > 780) sendPrompt(event);
 });
@@ -1404,6 +1681,8 @@ $('#refreshThreadsButton').addEventListener('click', () => loadThreads().catch((
 $('#refreshArtifactsButton').addEventListener('click', () => loadArtifacts().catch((error) => toast(error.message, 'error')));
 $('#loadOlderButton').addEventListener('click', () => loadOlderTurns().catch((error) => toast(error.message, 'error')));
 initChatScroll();
+initKeyboardInsets();
+initDingtalk(showTab);
 let artifactSearchTimer = null;
 $('#artifactSearch').addEventListener('input', (event) => {
   clearTimeout(artifactSearchTimer);
@@ -1423,7 +1702,10 @@ $('#artifactList').addEventListener('click', (event) => {
   }
   const artifact = state.artifacts.find((item) => item.id === button.dataset.artifactId);
   if (!artifact) return;
-  if (button.dataset.action === 'pin') toggleArtifactPin(artifact);
+  if (button.dataset.action === 'send-dingtalk' && artifact.available) {
+    button.disabled = true;
+    sendArtifactToDingtalk(artifact).finally(() => { button.disabled = false; });
+  }
   else if (button.dataset.action === 'preview' && artifact.available) openArtifact(artifact);
 });
 $('#timeline').addEventListener('click', (event) => {

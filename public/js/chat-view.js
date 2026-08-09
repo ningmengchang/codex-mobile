@@ -11,6 +11,10 @@
 import { $, $$, toast } from './dom.js';
 import { escapeAttribute } from './format.js';
 import { state, CHUNKED_TURN_THRESHOLD, CHUNKED_ITEM_THRESHOLD, CHUNK_TURNS_PER_FRAME } from './state.js';
+import { renderMermaid } from './mermaid-renderer.js';
+import { debug } from './debug.js';
+import { showThreadLoading, hideThreadLoading, updateThreadLoadingProgress } from './loading.js';
+export { showThreadLoading, hideThreadLoading, updateThreadLoadingProgress };
 import {
   fetchTurnPage,
   mergeTurns,
@@ -57,30 +61,6 @@ export function updateLoadOlderButton() {
   button.hidden = !visible;
   button.disabled = state.turnsLoadingOlder;
   button.textContent = state.turnsLoadingOlder ? '正在加载…' : '加载更早历史 ↑';
-}
-
-export function showThreadLoading() {
-  const overlay = $('#threadLoading');
-  if (!overlay) return;
-  overlay.hidden = false;
-  $('#threadLoadingProgress').textContent = '';
-  $('#promptInput').readOnly = true;
-  $('#sendButton').disabled = true;
-}
-
-export function hideThreadLoading() {
-  const overlay = $('#threadLoading');
-  if (!overlay) return;
-  overlay.hidden = true;
-  $('#threadLoadingProgress').textContent = '';
-  $('#promptInput').readOnly = false;
-  $('#sendButton').disabled = false;
-}
-
-export function updateThreadLoadingProgress(rendered, total) {
-  const overlay = $('#threadLoading');
-  if (!overlay || overlay.hidden) return;
-  $('#threadLoadingProgress').textContent = `${rendered}/${total} 回合`;
 }
 
 export function userMessagesNewestFirst() {
@@ -154,6 +134,7 @@ export function renderPlanDecision() {
 }
 
 export function finishTimelineRender(scroll, existingKeys = null) {
+  debug.log('timeline', 'finish', { version: state.timelineVersion });
   const timeline = $('#timeline');
   const hiding = timeline.classList.contains('timeline-rendering');
   if (hiding && state.pinnedToBottom) {
@@ -174,15 +155,18 @@ export function finishTimelineRender(scroll, existingKeys = null) {
   updateJumpButton();
   updateLoadOlderButton();
   scrollTimelineToBottom(scroll);
-  if (!$('#threadLoading').hidden) hideThreadLoading();
+  void renderMermaid(timeline).catch(() => {});
 }
 
 export function renderTimelineChunked(scroll) {
+  debug.log('timeline', 'chunked-start', { turns: state.turns.length });
   const jobId = ++timelineRenderJobId;
   timelineRenderBusy = true;
   timelineRenderJobVersion = state.timelineVersion;
   const timeline = $('#timeline');
-  timeline.classList.add('timeline-rendering');
+  if (!document.body.classList.contains('thread-loading-active')) {
+    timeline.classList.add('timeline-rendering');
+  }
   const scrollEl = $('#chatView');
   const maxBefore = scrollEl.scrollHeight - scrollEl.clientHeight;
   const anchorScroll = Math.min(scrollEl.scrollTop, Math.max(0, maxBefore));
@@ -217,6 +201,7 @@ export function renderTimelineChunked(scroll) {
 }
 
 export function renderTimeline(scroll = true, force = false) {
+  debug.log('timeline', 'render', { force, version: state.timelineVersion, busy: timelineRenderBusy });
   const timeline = $('#timeline');
   if (timelineRenderBusy) {
     if (!force && timelineRenderJobVersion === state.timelineVersion) return;
@@ -283,6 +268,7 @@ export function appendTurnSection(turn) {
   timeline.appendChild(wrapper.content);
   state.timelineRenderedVersion = state.timelineVersion;
   if (state.pinnedToBottom) scrollTimelineToBottom();
+  void renderMermaid(timeline).catch(() => {});
 }
 
 export function updateTimelineItem(turnId, item) {
@@ -336,6 +322,7 @@ export function updateTimelineItem(turnId, item) {
   } else {
     node.outerHTML = itemHtml(item, turnId);
   }
+  if (!state.activeTurnId) void renderMermaid($('#timeline')).catch(() => {});
   scrollTimelineToBottom();
 }
 
@@ -356,6 +343,7 @@ export function prependTurnSections(turnsAsc) {
   const afterHeight = timeline.scrollHeight;
   setScrollTopInstant(scrollEl, beforeScroll + (afterHeight - beforeHeight));
   state.timelineRenderedVersion = state.timelineVersion;
+  void renderMermaid(timeline).catch(() => {});
 }
 
 export async function loadOlderTurns() {

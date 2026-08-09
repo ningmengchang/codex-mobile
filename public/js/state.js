@@ -6,7 +6,6 @@ export const UI_STATE = {
 
 export const DELIVERABLE_KINDS = new Set(['markdown', 'office', 'pdf', 'html']);
 export const DELIVERABLE_KEYWORDS = ['prd', '方案', '需求', '设计', '说明', '报告', 'spec', 'final', '最终', '汇总', 'combined', '清单', '接口'];
-export const PINNED_ARTIFACTS_KEY = 'codex-mobile-pinned-artifacts';
 export const ARTIFACT_OTHER_PAGE = 50;
 export const ARTIFACT_OTHER_STEP = 100;
 export const THREAD_CACHE_MAX = 6;
@@ -34,12 +33,19 @@ export const state = {
   timelineRenderedVersion: -1,
   turnsNextCursor: null,
   turnsLoadingOlder: false,
+  dingtalkMessages: [],
+  dingtalkCursor: null,
+  dingtalkHasMore: false,
+  dingtalkLoading: false,
+  pendingCodexMessage: null,
   pinnedToBottom: true,
   threadCache: new Map(),
   threadLoadSeq: 0,
+  threadOpenedAt: null,
   questionCursor: 0,
   selectedMentions: [],
   currentArtifact: null,
+  threadAction: null,
   events: null,
   mode: localStorage.getItem('codex-mobile-mode') === 'plan' ? 'plan' : 'default',
   approvalsReviewer: (() => {

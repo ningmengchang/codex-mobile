@@ -47,6 +47,14 @@ class FakeBridge extends EventEmitter {
       this.lastTurnsListParams = params;
       return { data: [{ id: 'turn-9', status: 'completed', items: [] }], nextCursor: 'cursor-next' };
     }
+    if (method === 'thread/name/set') {
+      this.lastSetName = params;
+      return { thread: { id: params.threadId, name: params.name, cwd: this.project, turns: [], preview: '', status: 'idle', updatedAt: 2 } };
+    }
+    if (method === 'thread/delete') {
+      this.lastDelete = params;
+      return { deleted: true };
+    }
     if (method === 'thread/resume') {
       if (this.failRollout && params.threadId === this.failRollout) {
         throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: 'THREAD_NOT_FOUND' });
@@ -82,10 +90,18 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const pdfPath = path.join(project, 'sample.pdf');
   const officePath = path.join(project, 'sample.docx');
   const spreadsheetPath = path.join(project, 'sample.xlsx');
+  const markdownPath = path.join(project, 'guide.md');
+  const relatedPngPath = path.join(project, 'related.png');
+  const chinesePngPath = path.join(project, '上汽电池护照状态机-流程图-1.png');
+  const dingtalkPngPath = path.join(project, 'dingtalk.png');
   const renderedPage = path.join(cacheDir, 'page-2.jpg');
   fs.writeFileSync(pdfPath, '%PDF-1.4 test fixture');
   fs.writeFileSync(officePath, 'office test fixture');
   fs.writeFileSync(spreadsheetPath, 'spreadsheet test fixture');
+  fs.writeFileSync(markdownPath, '# Guide\n\n![图](./related.png)');
+  fs.writeFileSync(relatedPngPath, Buffer.from([1, 2, 3, 4]));
+  fs.writeFileSync(chinesePngPath, Buffer.from([5, 6, 7, 8]));
+  fs.writeFileSync(dingtalkPngPath, Buffer.from([9, 9, 9, 9]));
   fs.writeFileSync(renderedPage, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
   const config = {
     host: '127.0.0.1', port: 0, dataDir, cacheDir, secret: 'server-secret',
@@ -98,9 +114,30 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const rendered = [];
   const bridge = new FakeBridge();
   bridge.project = project;
+  const dingtalk = {
+    sentFiles: [],
+    listMessages: async ({ limit: _limit, before: _before } = {}) => ({
+      data: [
+        { id: 'msg-1', type: 'text', content: '测试消息', text: '测试消息', title: '测试消息', createdAt: '2026-08-09 10:00:00' },
+        { id: 'msg-media', type: 'file', content: '[文件] a.txt fileId: f1', text: 'a.txt', title: 'a.txt', fileId: 'f1', createdAt: '2026-08-09 09:00:00' },
+      ],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    downloadMedia: async (id) => {
+      if (id !== 'msg-media') throw new Error('该消息没有可下载的媒体');
+      return { filePath: dingtalkPngPath, fileName: 'dingtalk.png' };
+    },
+    createTodo: async ({ title, due }) => ({ success: true, result: { taskId: 'todo-1', title, due } }),
+    sendFileToSelf: async (filePath, fileName) => {
+      dingtalk.sentFiles.push({ filePath, fileName });
+      return { success: true, result: { messageId: 'send-1', fileName } };
+    },
+  };
   const app = createCodexMobileServer({
     config,
     bridge,
+    dingtalk,
     convertOfficeToPdf: async (filePath) => {
       assert.equal(filePath, officePath);
       return pdfPath;
@@ -271,6 +308,21 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(ascPage.status, 200);
     assert.equal(bridge.lastTurnsListParams.sortDirection, 'asc');
     assert.equal(bridge.lastTurnsListParams.cursor, undefined);
+    const renamed = await fetch(`${base}/api/threads/thread-1/name`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '新名字' }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(bridge.lastSetName, { threadId: 'thread-1', name: '新名字' });
+    const invalidName = await fetch(`${base}/api/threads/thread-1/name`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '   ' }),
+    });
+    assert.equal(invalidName.status, 400);
+    const removed = await fetch(`${base}/api/threads/thread-1/delete`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(bridge.lastDelete, { threadId: 'thread-1' });
+    assert.deepEqual(await removed.json(), { deleted: true, result: { deleted: true } });
     const pdfToken = encodeURIComponent(createArtifactToken(pdfPath, config));
     const document = await fetch(`${base}/api/artifacts/${pdfToken}/document`, { headers: { Cookie: cookie } });
     assert.equal(document.status, 200);
@@ -286,6 +338,54 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const officeDocument = await fetch(`${base}/api/artifacts/${officeToken}/document`, { headers: { Cookie: cookie } });
     assert.equal(officeDocument.status, 200);
     assert.deepEqual(await officeDocument.json(), { pages: 2, totalPages: 2, truncated: false });
+    const relatedToken = encodeURIComponent(createArtifactToken(markdownPath, config));
+    const related = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent('related.png')}`, { headers: { Cookie: cookie } });
+    assert.equal(related.status, 200);
+    assert.equal(related.headers.get('content-type'), 'image/png');
+    assert.deepEqual([...new Uint8Array(await related.arrayBuffer())], [1, 2, 3, 4]);
+    const escapedRelated = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent('/etc/hostname')}`, { headers: { Cookie: cookie } });
+    assert.equal(escapedRelated.status, 403);
+    const missing = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent('nope.png')}`, { headers: { Cookie: cookie } });
+    assert.equal(missing.status, 404);
+    const chineseName = '上汽电池护照状态机-流程图-1.png';
+    const chineseSingle = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent(chineseName)}`, { headers: { Cookie: cookie } });
+    assert.equal(chineseSingle.status, 200);
+    assert.deepEqual([...new Uint8Array(await chineseSingle.arrayBuffer())], [5, 6, 7, 8]);
+    const chineseDouble = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent(encodeURIComponent(chineseName))}`, { headers: { Cookie: cookie } });
+    assert.equal(chineseDouble.status, 200);
+    assert.deepEqual([...new Uint8Array(await chineseDouble.arrayBuffer())], [5, 6, 7, 8]);
+    const deniedDingtalk = await fetch(`${base}/api/dingtalk/messages`);
+    assert.equal(deniedDingtalk.status, 401);
+    const messages = await fetch(`${base}/api/dingtalk/messages`, { headers: { Cookie: cookie } });
+    assert.equal(messages.status, 200);
+    const messagesBody = await messages.json();
+    assert.equal(messagesBody.data[0].id, 'msg-1');
+    const media = await fetch(`${base}/api/dingtalk/media/msg-media/raw`, { headers: { Cookie: cookie } });
+    assert.equal(media.status, 200);
+    assert.deepEqual([...new Uint8Array(await media.arrayBuffer())], [9, 9, 9, 9]);
+    const mediaMissing = await fetch(`${base}/api/dingtalk/media/msg-missing/raw`, { headers: { Cookie: cookie } });
+    assert.equal(mediaMissing.status, 404);
+    const todo = await fetch(`${base}/api/dingtalk/todos`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '整理周报' }),
+    });
+    assert.equal(todo.status, 200);
+    assert.equal((await todo.json()).result.taskId, 'todo-1');
+    const todoInvalid = await fetch(`${base}/api/dingtalk/todos`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '   ' }),
+    });
+    assert.equal(todoInvalid.status, 400);
+    const sent = await fetch(`${base}/api/artifacts/${pdfToken}/send-dingtalk`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(sent.status, 200);
+    assert.equal((await sent.json()).sent, true);
+    assert.deepEqual(dingtalk.sentFiles, [{ filePath: pdfPath, fileName: 'sample.pdf' }]);
+    const sentBadToken = await fetch(`${base}/api/artifacts/not-a-token/send-dingtalk`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(sentBadToken.status, 401);
     const spreadsheetToken = encodeURIComponent(createArtifactToken(spreadsheetPath, config));
     const workbook = await fetch(`${base}/api/artifacts/${spreadsheetToken}/workbook`, { headers: { Cookie: cookie } });
     assert.equal(workbook.status, 200);

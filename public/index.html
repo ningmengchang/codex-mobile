@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#101318">
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=53">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -83,6 +83,11 @@
         <div id="mobileThreadList" class="thread-list mobile"></div>
       </section>
 
+      <section id="favoritesView" class="view" data-view="favorites">
+        <div class="section-head"><div><p class="eyebrow">FAVORITES</p></div></div>
+        <div id="favoriteList" class="thread-list mobile"></div>
+      </section>
+
       <section id="artifactsView" class="view" data-view="artifacts">
         <div class="section-head"><div><p class="eyebrow">OUTPUTS</p></div><button id="refreshArtifactsButton" class="text-button">刷新</button></div>
         <input id="artifactSearch" class="artifact-search" type="search" placeholder="搜索文件名或路径" autocomplete="off" enterkeyhint="search">
@@ -95,12 +100,18 @@
         <p id="projectPath" class="project-path"></p>
         <div id="projectList" class="project-list"></div>
       </section>
+
+      <section id="dingtalkView" class="view" data-view="dingtalk">
+        <div class="section-head"><div><p class="eyebrow">DINGTALK</p></div><button id="refreshDingtalkButton" class="text-button">刷新</button></div>
+        <div id="dingtalkMessageList" class="dingtalk-list"></div>
+      </section>
     </main>
 
     <nav class="bottom-nav" aria-label="主导航">
       <button data-tab="threads"><span>≡</span><small>会话</small></button>
-      <button data-tab="artifacts"><span>◇</span><small>产出物</small><i id="artifactBadge" hidden></i></button>
+      <button data-tab="favorites"><span>☆</span><small>收藏</small></button>
       <button data-tab="chat" class="active nav-primary"><span>◒</span><small>控制</small></button>
+      <button data-tab="artifacts"><span>◇</span><small>产出物</small><i id="artifactBadge" hidden></i></button>
       <button data-tab="projects"><span>⌁</span><small>项目</small></button>
       <button id="settingsButton" class="nav-settings" aria-label="设置" title="设置"><span>⚙</span><small>设置</small></button>
     </nav>
@@ -125,6 +136,44 @@
   <dialog id="skillSheet" class="settings-dialog">
     <header><strong>技能</strong><button id="closeSkillButton" class="icon-button" aria-label="关闭技能">×</button></header>
     <div id="skillList" class="skill-list"></div>
+  </dialog>
+
+  <dialog id="threadActionDialog" class="settings-dialog">
+    <header><strong>会话操作</strong><button id="closeThreadActionButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body">
+      <button id="threadRenameAction" type="button" class="thread-action-row">重命名</button>
+      <button id="threadDeleteAction" type="button" class="thread-action-row danger">删除会话</button>
+      <div id="threadDeleteConfirm" hidden>
+        <p>删除后无法恢复，确定删除“<span id="threadDeleteName"></span>”吗？</p>
+        <div class="thread-confirm-actions">
+          <button id="threadDeleteCancel" type="button">取消</button>
+          <button id="threadDeleteOk" type="button" class="button danger">确认删除</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="threadRenameDialog" class="settings-dialog">
+    <header><strong>重命名会话</strong><button id="closeThreadRenameButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body">
+      <input id="threadRenameInput" type="text" maxlength="100" placeholder="输入新名称" autocomplete="off">
+      <div class="thread-confirm-actions">
+        <button id="threadRenameCancel" type="button">取消</button>
+        <button id="threadRenameConfirm" type="button" class="button primary">保存</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dingtalkTodoDialog" class="settings-dialog">
+    <header><strong>生成钉钉待办</strong><button id="closeDingtalkTodoButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body">
+      <label><span>标题</span><input id="dingtalkTodoTitle" type="text" maxlength="500" autocomplete="off"></label>
+      <label><span>截止时间（可选）</span><input id="dingtalkTodoDue" type="datetime-local"></label>
+      <div class="thread-confirm-actions">
+        <button id="cancelDingtalkTodoButton" type="button">取消</button>
+        <button id="confirmDingtalkTodoButton" type="button" class="button primary">创建待办</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="previewDialog" class="preview-dialog">

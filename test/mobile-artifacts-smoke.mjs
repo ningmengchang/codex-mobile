@@ -134,6 +134,10 @@ try {
         body: `# ${item.name}\n内容预览`,
       });
     }
+    const sendMatch = pathname.match(/^\/api\/artifacts\/([^/]+)\/send-dingtalk$/);
+    if (sendMatch && route.request().method() === 'POST') {
+      return fulfillJson({ sent: true });
+    }
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
     const contentType = file.endsWith('.js') ? 'text/javascript; charset=utf-8'
@@ -179,6 +183,13 @@ try {
   if (!sections.includes('文档产出')) throw new Error(`缺少“文档产出”分组：${sections.join(',')}`);
   const firstCardText = await page.locator('.artifact-card').first().textContent();
   if (!firstCardText.includes('PRD')) throw new Error(`文档未排到最前：${firstCardText}`);
+  const timeTexts = await page.locator('.artifact-card .artifact-time').allTextContents();
+  if (!timeTexts.length || timeTexts.every((text) => !text.trim())) {
+    throw new Error(`产出物卡片缺少修改时间：${timeTexts.join(',')}`);
+  }
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.locator('.artifact-card button[data-action="send-dingtalk"]').first().click();
+  await page.waitForFunction(() => document.querySelector('#toastRegion')?.textContent?.includes('已发送'), null, { timeout: 10_000 });
 
   // 4) 搜索过滤与空态
   await page.locator('#artifactSearch').fill('prd');
@@ -192,19 +203,13 @@ try {
   const restoredCards = await page.locator('.artifact-card').count();
   if (restoredCards !== 6) throw new Error(`清空搜索应恢复 6 张卡片，实际 ${restoredCards}`);
 
-  // 5) 手动置顶 + 刷新后持久化
-  const prdCard = page.locator('.artifact-card', { hasText: 'menu-manage-prd.md' });
-  await prdCard.locator('.pin-button').click();
-  await page.locator('.artifact-section', { hasText: '置顶' }).waitFor({ timeout: 10_000 });
-  const pinnedFirst = await page.locator('.artifact-card').first().textContent();
-  if (!pinnedFirst.includes('menu-manage-prd.md')) throw new Error(`置顶后 PRD 未在最前：${pinnedFirst}`);
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="artifacts"]').click();
-  await page.locator('.artifact-section', { hasText: '置顶' }).waitFor({ timeout: 10_000 });
-  const pinnedAfterReload = await page.locator('.artifact-card').first().textContent();
-  if (!pinnedAfterReload.includes('menu-manage-prd.md')) throw new Error('刷新后置顶丢失');
-  await page.locator('.artifact-card', { hasText: 'menu-manage-prd.md' }).locator('.pin-button').click();
+  // 5) 新卡片布局：类型徽标存在，置顶按钮已移除
+  const kindTexts = await page.locator('.artifact-card .artifact-kind').allTextContents();
+  if (!kindTexts.length || !kindTexts.some((text) => text.trim())) {
+    throw new Error(`产出物卡片缺少类型徽标：${kindTexts.join(',')}`);
+  }
+  const pinCount = await page.locator('.artifact-card .pin-button').count();
+  if (pinCount !== 0) throw new Error(`置顶按钮未移除：${pinCount}`);
 
   // 6) SSE 推送新产出物后列表与聊天条同步
   const newDoc = artifact({
@@ -216,13 +221,15 @@ try {
     window.__sse.emit('artifacts', { threadId: 'thread-1', turnId: 'turn-1', items: [item] });
   }, newDoc);
   await page.waitForTimeout(150);
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.waitForFunction(() => !document.body.classList.contains('keyboard-open'));
   await page.locator('button[data-tab="chat"]').click();
   await page.locator('.turn-artifact-chip', { hasText: '登录日志 PRD.md' }).waitFor({ timeout: 10_000 });
   const chipsAfterSse = await page.locator('.turn-artifact-chip').count();
   if (chipsAfterSse !== 3) throw new Error(`SSE 后应显示 3 个文档芯片，实际 ${chipsAfterSse}`);
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-artifacts.png', fullPage: true });
-  process.stdout.write(`${JSON.stringify({ chipNames, chipCount, sections, searchCards, restoredCards, pinnedAfterReload, chipsAfterSse })}\n`);
+  process.stdout.write(`${JSON.stringify({ chipNames, chipCount, sections, searchCards, restoredCards, kindOk: true, pinRemoved: pinCount === 0, chipsAfterSse })}\n`);
 } finally {
   await browser.close();
 }

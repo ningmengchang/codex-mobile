@@ -9,6 +9,7 @@ const playwrightPath = process.env.PLAYWRIGHT_PATH
 const { chromium } = require(playwrightPath);
 
 const publicRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+let threadReadCount = 0;
 const allTurns = Array.from({ length: 21 }, (_, index) => {
   const number = index + 1;
   return {
@@ -37,8 +38,12 @@ try {
   });
   await context.addInitScript((boot) => {
     const listeners = new Map();
+    let openCallback = null;
     class FakeEventSource {
-      constructor() { setTimeout(() => this.onopen?.(), 30); }
+      constructor() {
+        openCallback = () => this.onopen?.();
+        setTimeout(() => this.onopen?.(), 30);
+      }
       addEventListener(type, callback) {
         if (!listeners.has(type)) listeners.set(type, []);
         listeners.get(type).push(callback);
@@ -46,6 +51,13 @@ try {
       close() {}
     }
     window.EventSource = FakeEventSource;
+    window.__sse = {
+      triggerOpen() { openCallback?.(); },
+      emit(type, data) {
+        const event = { data: JSON.stringify(data) };
+        for (const callback of listeners.get(type) ?? []) callback(event);
+      },
+    };
     window.__boot = boot;
   }, bootstrap);
   const page = await context.newPage();
@@ -60,11 +72,15 @@ try {
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
     if (pathname === '/api/threads' && route.request().method() === 'GET') return fulfillJson({ data: [threadMeta] });
     if (pathname === '/api/threads/thread-1' && route.request().method() === 'GET') {
+      threadReadCount += 1;
       await new Promise((resolve) => setTimeout(resolve, 300));
       return fulfillJson({ thread: threadMeta });
     }
     if (pathname === '/api/threads/thread-1/resume') return fulfillJson({ thread: threadMeta });
-    if (pathname === '/api/threads/thread-1/artifacts') return fulfillJson({ data: [] });
+    if (pathname === '/api/threads/thread-1/artifacts') {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return fulfillJson({ data: [] });
+    }
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
@@ -80,7 +96,24 @@ try {
     // 分块渲染开始后：时间线必须带隐藏类（不允许露出部分历史）
     await page.waitForFunction(() => document.querySelectorAll('#timeline [data-turn]').length > 0, null, { timeout: 10_000 });
     const hidingDuringRender = await page.evaluate(() => document.querySelector('#timeline').classList.contains('timeline-rendering'));
-    if (!hidingDuringRender) throw new Error('渲染过程中时间线未隐藏');
+    if (hidingDuringRender) throw new Error('加载期间时间线不应单独隐藏');
+    const disabledDuringArtifacts = await page.evaluate(() => (
+      document.querySelector('#promptInput').readOnly && document.querySelector('#sendButton').disabled
+    ));
+    if (!disabledDuringArtifacts) throw new Error('产出物加载期间输入框不应可用');
+    const overlayBlocksInput = await page.evaluate(() => {
+      const input = document.querySelector('#promptInput');
+      const rect = input.getBoundingClientRect();
+      const element = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return element === document.querySelector('#threadLoading') || element?.closest?.('#threadLoading');
+    });
+    if (!overlayBlocksInput) throw new Error('产出物加载期间输入框未被遮罩挡住');
+    const hiddenDuringLoad = await page.evaluate(() => {
+      const composer = getComputedStyle(document.querySelector('#composer')).display;
+      const nav = getComputedStyle(document.querySelector('.bottom-nav')).display;
+      return composer === 'none' && nav === 'none';
+    });
+    if (!hiddenDuringLoad) throw new Error('产出物加载期间输入框/导航未被隐藏');
     // 渲染完成：遮罩关闭、隐藏类移除、停在最新
     await page.waitForFunction(() => document.querySelector('#threadLoading')?.hidden === true, null, { timeout: 10_000 });
     const revealed = await page.evaluate(() => ({
@@ -88,8 +121,54 @@ try {
       scrollTop: document.querySelector('#chatView').scrollTop,
       scrollHeight: document.querySelector('#chatView').scrollHeight,
       clientHeight: document.querySelector('#chatView').clientHeight,
+      inputEnabled: !document.querySelector('#promptInput').readOnly && !document.querySelector('#sendButton').disabled,
+      composerDisplay: getComputedStyle(document.querySelector('#composer')).display,
+      navDisplay: getComputedStyle(document.querySelector('.bottom-nav')).display,
     }));
     if (revealed.hiding) throw new Error(`渲染完成后时间线仍隐藏：${JSON.stringify(revealed)}`);
+    if (!revealed.inputEnabled) throw new Error(`加载完成后输入框仍不可用：${JSON.stringify(revealed)}`);
+    if (revealed.composerDisplay === 'none' || revealed.navDisplay === 'none') {
+      throw new Error(`加载完成后输入框/导航未恢复：${JSON.stringify(revealed)}`);
+    }
+    const inputClickable = await page.evaluate(() => {
+      const input = document.querySelector('#promptInput');
+      const rect = input.getBoundingClientRect();
+      const element = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return element === input || element?.closest?.('#promptInput') === input;
+    });
+    if (!inputClickable) throw new Error('加载完成后输入框仍被遮挡');
+    const beforeWait = threadReadCount;
+    await page.waitForTimeout(1700);
+    if (threadReadCount !== beforeWait) throw new Error('打开会话后 1.5 秒内不应自动刷新');
+    await page.evaluate(() => window.__sse.triggerOpen());
+    await page.waitForTimeout(300);
+    if (threadReadCount !== beforeWait + 1) throw new Error('超过 1.5 秒后自动刷新未恢复');
+    await page.waitForTimeout(600);
+    const stable = await page.evaluate(() => ({
+      hiding: document.querySelector('#timeline').classList.contains('timeline-rendering'),
+      inputEnabled: !document.querySelector('#promptInput').readOnly && !document.querySelector('#sendButton').disabled,
+      composerDisplay: getComputedStyle(document.querySelector('#composer')).display,
+    }));
+    if (stable.hiding || !stable.inputEnabled || stable.composerDisplay === 'none') {
+      throw new Error(`加载完成后仍出现闪烁或输入框不可用：${JSON.stringify(stable)}`);
+    }
+    const beforeOld = threadReadCount;
+    await page.evaluate(() => window.__sse.emit('codex', {
+      method: 'turn/completed',
+      at: new Date(Date.now() - 60_000).toISOString(),
+      params: { thread_id: 'thread-1', turn_id: 'turn-1', turn: { id: 'turn-1', status: 'completed' } },
+    }));
+    await page.waitForTimeout(200);
+    if (threadReadCount !== beforeOld) throw new Error('旧 SSE 事件不应触发自动刷新');
+    const stillStable = await page.evaluate(() => !document.querySelector('#timeline').classList.contains('timeline-rendering'));
+    if (!stillStable) throw new Error('旧 SSE 事件触发了时间线闪烁');
+    await page.evaluate(() => window.__sse.emit('codex', {
+      method: 'turn/completed',
+      at: new Date().toISOString(),
+      params: { thread_id: 'thread-1', turn_id: 'turn-1', turn: { id: 'turn-1', status: 'completed' } },
+    }));
+    await page.waitForTimeout(400);
+    if (threadReadCount <= beforeOld) throw new Error('新 SSE 事件未正常处理');
     if (revealed.scrollTop + revealed.clientHeight < revealed.scrollHeight - 60) {
       throw new Error(`渲染完成后未停在最新：${JSON.stringify(revealed)}`);
     }

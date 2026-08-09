@@ -96,6 +96,8 @@ try {
   await page.locator('.message').first().waitFor({ timeout: 10_000 });
 
   await page.locator('#promptInput').fill('草稿内容');
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.waitForFunction(() => !document.body.classList.contains('keyboard-open'));
   await page.locator('button[data-tab="artifacts"]').click();
   await page.waitForTimeout(200);
   await page.reload({ waitUntil: 'domcontentloaded' });

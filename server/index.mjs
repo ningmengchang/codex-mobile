@@ -8,6 +8,7 @@ import { ArtifactTracker } from './artifacts.mjs';
 import { clearSessionCookie, COOKIE_NAME, exchangePairingCode, requireSession, sessionCookie } from './auth.mjs';
 import { loadConfig } from './config.mjs';
 import { convertOfficeToPdf, getPdfPageCount, renderPdfPage } from './convert.mjs';
+import { createDingTalk } from './dingtalk.mjs';
 import { EventHub } from './events.mjs';
 import { classifyFile, fileMetadata, mimeType } from './files.mjs';
 import { listSkills } from './skills.mjs';
@@ -32,6 +33,14 @@ const STATIC_FILES = new Map([
   ['/js/state.js', ['js/state.js', 'text/javascript; charset=utf-8']],
   ['/js/chat-core.js', ['js/chat-core.js', 'text/javascript; charset=utf-8']],
   ['/js/chat-view.js', ['js/chat-view.js', 'text/javascript; charset=utf-8']],
+  ['/js/mermaid-renderer.js', ['js/mermaid-renderer.js', 'text/javascript; charset=utf-8']],
+  ['/js/keyboard.js', ['js/keyboard.js', 'text/javascript; charset=utf-8']],
+  ['/js/loading.js', ['js/loading.js', 'text/javascript; charset=utf-8']],
+  ['/js/dingtalk.js', ['js/dingtalk.js', 'text/javascript; charset=utf-8']],
+  ['/js/debug.js', ['js/debug.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/marked.esm.js', ['vendor/marked.esm.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/purify.js', ['vendor/purify.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/mermaid.min.js', ['vendor/mermaid.min.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/manifest.webmanifest', ['manifest.webmanifest', 'application/manifest+json; charset=utf-8']],
   ['/sw.js', ['sw.js', 'text/javascript; charset=utf-8']],
@@ -39,7 +48,7 @@ const STATIC_FILES = new Map([
 ]);
 
 const APP_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
@@ -86,7 +95,7 @@ function serveStatic(request, response, pathname) {
   const payload = fs.readFileSync(path.join(PUBLIC_ROOT, filename));
   response.writeHead(200, {
     ...APP_HEADERS,
-    'Cache-Control': filename === 'sw.js' ? 'no-cache' : 'public, max-age=300',
+    'Cache-Control': filename === 'sw.js' || filename === 'index.html' ? 'no-cache' : 'public, max-age=300',
     'Content-Type': contentType,
     'Content-Length': payload.length,
   });
@@ -166,6 +175,27 @@ function isThreadGone(error) {
     || message.includes('no rollout found')
     || message.includes('thread not found')
     || message.includes('rollout');
+}
+
+function resolveRelatedPath(baseDir, relative, config) {
+  const candidates = [relative];
+  if (relative.includes('%')) {
+    try {
+      const decoded = decodeURIComponent(relative);
+      if (decoded !== relative) candidates.push(decoded);
+    } catch {}
+  }
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      return assertAllowedPath(path.resolve(baseDir, candidate), config.allowedRoots);
+    } catch (error) {
+      if (error?.code === 'PATH_NOT_ALLOWED') throw error;
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new AppError('文件不存在或已经被移动。', 404, 'NOT_FOUND');
 }
 
 async function documentPdfPath(filePath, config, tools) {
@@ -304,6 +334,7 @@ export function createCodexMobileServer(options = {}) {
   const hub = options.hub ?? new EventHub();
   const bridge = options.bridge ?? new AppServerBridge(config);
   const tracker = options.tracker ?? new ArtifactTracker(config, hub);
+  const dingtalk = options.dingtalk ?? createDingTalk(config);
   const documentTools = {
     convertOfficeToPdf: options.convertOfficeToPdf ?? convertOfficeToPdf,
     getPdfPageCount: options.getPdfPageCount ?? getPdfPageCount,
@@ -433,6 +464,23 @@ export function createCodexMobileServer(options = {}) {
         tracker.registerThread(result.thread.id, result.thread.cwd);
         threadMeta.set(result.thread.id, { cwd: result.thread.cwd });
         json(response, 200, result);
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/name$/);
+      if (request.method === 'POST' && match) {
+        const body = await readBody(request, config.maxBodyBytes);
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (!name) throw new AppError('会话名称不能为空。', 400, 'NAME_REQUIRED');
+        if (name.length > 100) throw new AppError('会话名称过长。', 400, 'NAME_TOO_LONG');
+        const result = await bridge.request('thread/name/set', { threadId: match[0], name });
+        json(response, 200, result);
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/delete$/);
+      if (request.method === 'POST' && match) {
+        const result = await bridge.request('thread/delete', { threadId: match[0] });
+        threadMeta.delete(match[0]);
+        json(response, 200, { deleted: true, result });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/resume$/);
@@ -578,6 +626,32 @@ export function createCodexMobileServer(options = {}) {
         json(response, 200, { ...fileMetadata(claims.path, root), fileKind: classifyFile(claims.path) });
         return;
       }
+      match = routeMatch(pathname, /^\/api\/artifacts\/([^/]+)\/related$/);
+      if ((request.method === 'GET' || request.method === 'HEAD') && match) {
+        const claims = verifyArtifactToken(match[0], config);
+        const relative = url.searchParams.get('path');
+        if (!relative || relative.includes('\0')) throw new AppError('缺少相对路径。', 400, 'RELATED_PATH_REQUIRED');
+        const resolved = resolveRelatedPath(path.dirname(claims.path), relative, config);
+        const stat = fs.statSync(resolved);
+        if (!stat.isFile()) throw new AppError('相对路径不是文件。', 400, 'NOT_A_FILE');
+        if (stat.size > config.maxFileBytes) throw new AppError('文件超过预览大小限制。', 413, 'FILE_TOO_LARGE');
+        streamFile(request, response, resolved, { contentType: mimeType(resolved) });
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/artifacts\/([^/]+)\/send-dingtalk$/);
+      if (request.method === 'POST' && match) {
+        const claims = verifyArtifactToken(match[0], config);
+        const stat = fs.statSync(claims.path);
+        if (!stat.isFile()) throw new AppError('目录不能发送。', 400, 'NOT_A_FILE');
+        if (stat.size > config.maxFileBytes) throw new AppError('文件超过发送大小限制。', 413, 'FILE_TOO_LARGE');
+        try {
+          const result = await dingtalk.sendFileToSelf(claims.path, path.basename(claims.path));
+          json(response, 200, { sent: true, result });
+        } catch (error) {
+          throw new AppError(error.message || '钉钉发送失败', 502, 'DINGTALK_SEND_ERROR');
+        }
+        return;
+      }
       match = routeMatch(pathname, /^\/api\/artifacts\/([^/]+)\/workbook$/);
       if (request.method === 'GET' && match) {
         const claims = verifyArtifactToken(match[0], config);
@@ -639,6 +713,42 @@ export function createCodexMobileServer(options = {}) {
         }
         return;
       }
+      if (request.method === 'GET' && pathname === '/api/dingtalk/messages') {
+        try {
+          const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 100);
+          const before = url.searchParams.get('before') || undefined;
+          json(response, 200, await dingtalk.listMessages({ limit, before }));
+        } catch (error) {
+          throw new AppError(error.message || '钉钉服务异常', 502, 'DINGTALK_ERROR');
+        }
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/dingtalk\/media\/([^/]+)\/(raw|download)$/);
+      if ((request.method === 'GET' || request.method === 'HEAD') && match) {
+        try {
+          const media = await dingtalk.downloadMedia(match[0]);
+          streamFile(request, response, media.filePath, {
+            contentType: mimeType(media.filePath),
+            download: match[1] === 'download',
+            filename: media.fileName,
+          });
+        } catch (error) {
+          throw new AppError(error.message || '钉钉媒体下载失败', 404, 'DINGTALK_MEDIA_NOT_FOUND');
+        }
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/dingtalk/todos') {
+        const body = await readBody(request, config.maxBodyBytes);
+        const title = typeof body.title === 'string' ? body.title.trim() : '';
+        if (!title) throw new AppError('待办标题不能为空。', 400, 'TODO_TITLE_REQUIRED');
+        if (title.length > 500) throw new AppError('待办标题过长。', 400, 'TODO_TITLE_TOO_LONG');
+        try {
+          json(response, 200, await dingtalk.createTodo({ title, due: body.due || undefined }));
+        } catch (error) {
+          throw new AppError(error.message || '钉钉待办创建失败', 502, 'DINGTALK_TODO_ERROR');
+        }
+        return;
+      }
       throw new AppError('没有找到该接口。', 404, 'NOT_FOUND');
     } catch (error) {
       const appError = error instanceof AppError
@@ -652,7 +762,7 @@ export function createCodexMobileServer(options = {}) {
     }
   });
 
-  return { server, config, bridge, tracker, hub };
+  return { server, config, bridge, tracker, hub, dingtalk };
 }
 
 const isMain = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;

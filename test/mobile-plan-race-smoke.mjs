@@ -42,8 +42,12 @@ try {
   });
   await context.addInitScript((boot) => {
     const listeners = new Map();
+    let openCallback = null;
     class FakeEventSource {
-      constructor() { setTimeout(() => this.onopen?.(), 800); }
+      constructor() {
+        openCallback = () => this.onopen?.();
+        setTimeout(() => this.onopen?.(), 800);
+      }
       addEventListener(type, callback) {
         if (!listeners.has(type)) listeners.set(type, []);
         listeners.get(type).push(callback);
@@ -52,6 +56,7 @@ try {
     }
     window.EventSource = FakeEventSource;
     window.__sse = {
+      triggerOpen() { openCallback?.(); },
       emit(type, data) {
         const event = { data: JSON.stringify(data) };
         for (const callback of listeners.get(type) ?? []) callback(event);
@@ -99,9 +104,11 @@ try {
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
   await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
-  await page.waitForTimeout(850);
+  await page.waitForTimeout(1750);
 
-  // 此时 onopen 已触发：旧后台刷新（turnsCalls=2，延迟 500ms，快照不含方案）正在途中
+  // 抑制窗口结束后触发 onopen：旧后台刷新（turnsCalls=2，延迟 500ms，快照不含方案）正在途中
+  await page.evaluate(() => window.__sse.triggerOpen());
+  await page.waitForTimeout(50);
   await page.evaluate(() => {
     window.__sse.emit('codex', {
       method: 'turn/started',
