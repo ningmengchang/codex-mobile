@@ -56,9 +56,9 @@ try {
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
   await page.waitForTimeout(300);
 
-  // 1) 按钮顺序：会话 | 收藏 | 控制 | 产出物 | 项目 | 设置
+  // 1) 按钮顺序：会话 | 收藏 | 控制 | 产出物 | 文件目录 | 设置
   const labels = await page.locator('.bottom-nav button small').allTextContents();
-  const expected = ['会话', '收藏', '控制', '产出物', '项目', '设置'];
+  const expected = ['会话', '收藏', '控制', '产出物', '文件目录', '设置'];
   if (JSON.stringify(labels) !== JSON.stringify(expected)) {
     throw new Error(`底部按钮顺序错误：${labels.join('、')}`);
   }

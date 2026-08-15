@@ -10,13 +10,19 @@ import { loadConfig } from './config.mjs';
 import { convertOfficeToPdf, getPdfPageCount, renderPdfPage } from './convert.mjs';
 import { createDingTalk } from './dingtalk.mjs';
 import { EventHub } from './events.mjs';
+import { createFavoritesStore } from './favorites.mjs';
 import { classifyFile, fileMetadata, mimeType } from './files.mjs';
 import { listSkills } from './skills.mjs';
+import { createSkillMarket } from './skill-market.mjs';
+import { createRolloutHistory, isRolloutCursor } from './rollout-history.mjs';
 import { readWorkbook, readWorksheet } from './spreadsheet.mjs';
+import { receiveUpload } from './uploads.mjs';
+import { createProjectEntry, deleteProjectEntry } from './project-files.mjs';
 import {
   AppError,
   assertAllowedPath,
   assertSameOrigin,
+  createArtifactToken,
   isInside,
   verifyArtifactToken,
 } from './security.mjs';
@@ -38,6 +44,7 @@ const STATIC_FILES = new Map([
   ['/js/loading.js', ['js/loading.js', 'text/javascript; charset=utf-8']],
   ['/js/dingtalk.js', ['js/dingtalk.js', 'text/javascript; charset=utf-8']],
   ['/js/debug.js', ['js/debug.js', 'text/javascript; charset=utf-8']],
+  ['/js/skill-market.js', ['js/skill-market.js', 'text/javascript; charset=utf-8']],
   ['/vendor/marked.esm.js', ['vendor/marked.esm.js', 'text/javascript; charset=utf-8']],
   ['/vendor/purify.js', ['vendor/purify.js', 'text/javascript; charset=utf-8']],
   ['/vendor/mermaid.min.js', ['vendor/mermaid.min.js', 'text/javascript; charset=utf-8']],
@@ -93,9 +100,11 @@ function serveStatic(request, response, pathname) {
   if (!item) return false;
   const [filename, contentType] = item;
   const payload = fs.readFileSync(path.join(PUBLIC_ROOT, filename));
+  const mustRevalidate = filename === 'sw.js' || filename === 'index.html'
+    || filename.endsWith('.js') || filename.endsWith('.css');
   response.writeHead(200, {
     ...APP_HEADERS,
-    'Cache-Control': filename === 'sw.js' || filename === 'index.html' ? 'no-cache' : 'public, max-age=300',
+    'Cache-Control': mustRevalidate ? 'no-cache' : 'public, max-age=300',
     'Content-Type': contentType,
     'Content-Length': payload.length,
   });
@@ -163,6 +172,74 @@ function validateProject(candidate, config) {
   return project;
 }
 
+function favoriteInput(value, config) {
+  if (!value || typeof value !== 'object') throw new AppError('收藏内容无效。', 400, 'INVALID_FAVORITE');
+  const id = typeof value.id === 'string' ? value.id.trim() : '';
+  const name = typeof value.name === 'string' ? value.name.trim() : '';
+  const cwd = typeof value.cwd === 'string' ? value.cwd.trim() : '';
+  if (!id) throw new AppError('收藏缺少会话 ID。', 400, 'FAVORITE_ID_REQUIRED');
+  if (id.length > 200) throw new AppError('会话 ID 过长。', 400, 'FAVORITE_ID_TOO_LONG');
+  if (name.length > 200) throw new AppError('会话名称过长。', 400, 'FAVORITE_NAME_TOO_LONG');
+  if (!cwd) throw new AppError('收藏缺少项目目录。', 400, 'FAVORITE_CWD_REQUIRED');
+  return {
+    id,
+    name: name || '未命名会话',
+    cwd: validateProject(cwd, config),
+    updatedAt: Number.isFinite(Number(value.updatedAt)) ? Math.max(0, Number(value.updatedAt)) : Date.now(),
+  };
+}
+
+function resolveLinkedPath(rawPath, cwd, config) {
+  let candidate = String(rawPath ?? '').trim();
+  if (!candidate) throw new AppError('文件路径不能为空。', 400, 'FILE_PATH_REQUIRED');
+  if (candidate.startsWith('file:')) {
+    try {
+      candidate = fileURLToPath(candidate);
+    } catch {
+      throw new AppError('文件链接格式不正确。', 400, 'INVALID_FILE_URL');
+    }
+  } else {
+    try { candidate = decodeURIComponent(candidate); } catch {}
+    candidate = candidate.split('#', 1)[0].split('?', 1)[0];
+    if (!path.isAbsolute(candidate)) {
+      candidate = path.resolve(validateProject(cwd, config), candidate);
+    }
+  }
+  return assertAllowedPath(candidate, config.allowedRoots);
+}
+
+function linkedArtifact(filePath, config) {
+  const root = config.allowedRoots.find((item) => isInside(item, filePath));
+  const token = createArtifactToken(filePath, config);
+  return {
+    id: `linked:${token}`,
+    projectPath: root,
+    status: 'linked',
+    ...fileMetadata(filePath, root),
+    available: true,
+    token,
+  };
+}
+
+function listDirectory(directoryPath, config) {
+  const entries = fs.readdirSync(directoryPath, { withFileTypes: true })
+    .filter((entry) => !entry.isSymbolicLink())
+    .map((entry) => {
+      try { return linkedArtifact(path.join(directoryPath, entry.name), config); } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+      return left.name.localeCompare(right.name, 'zh-CN');
+    });
+  const root = config.allowedRoots.find((item) => isInside(item, directoryPath));
+  const parentPath = path.dirname(directoryPath);
+  const parent = directoryPath !== root && isInside(root, parentPath)
+    ? linkedArtifact(parentPath, config)
+    : null;
+  return { data: entries.slice(0, 500), parent, truncated: entries.length > 500 };
+}
+
 function threadAllowed(thread, config) {
   const cwd = path.resolve(String(thread?.cwd ?? '/'));
   return config.allowedRoots.some((root) => isInside(root, cwd));
@@ -222,17 +299,28 @@ function listProjects(config, requestedPath) {
   const current = requestedPath
     ? validateProject(requestedPath, config)
     : config.allowedRoots[0];
-  const entries = fs.readdirSync(current, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.startsWith('.'))
-    .slice(0, 300)
-    .map((entry) => ({ name: entry.name, path: path.join(current, entry.name) }))
-    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+  const allEntries = fs.readdirSync(current, { withFileTypes: true })
+    .filter((entry) => !entry.isSymbolicLink() && !entry.name.startsWith('.') && (entry.isDirectory() || entry.isFile()))
+    .map((entry) => {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        return { name: entry.name, path: entryPath, isDirectory: true, fileKind: 'directory' };
+      }
+      try { return { ...linkedArtifact(entryPath, config), path: entryPath }; } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+      return left.name.localeCompare(right.name, 'zh-CN');
+    });
+  const entries = allEntries.slice(0, 300);
   const root = config.allowedRoots.find((item) => isInside(item, current)) ?? current;
   return {
     current: { name: path.basename(current), path: current },
     parent: current !== root ? path.dirname(current) : null,
     root,
     entries,
+    truncated: allEntries.length > entries.length,
   };
 }
 
@@ -335,6 +423,9 @@ export function createCodexMobileServer(options = {}) {
   const bridge = options.bridge ?? new AppServerBridge(config);
   const tracker = options.tracker ?? new ArtifactTracker(config, hub);
   const dingtalk = options.dingtalk ?? createDingTalk(config);
+  const favorites = options.favorites ?? createFavoritesStore(config);
+  const skillMarket = options.skillMarket ?? createSkillMarket(config);
+  const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
   const documentTools = {
     convertOfficeToPdf: options.convertOfficeToPdf ?? convertOfficeToPdf,
     getPdfPageCount: options.getPdfPageCount ?? getPdfPageCount,
@@ -345,8 +436,58 @@ export function createCodexMobileServer(options = {}) {
     readWorksheet: options.readWorksheet ?? readWorksheet,
   };
   const pairingAttempts = [];
-  const catalogs = { models: [], collaborationModes: [] };
+  const catalogs = {
+    account: null,
+    models: [],
+    collaborationModes: [],
+    refreshedAt: 0,
+    refreshPromise: null,
+  };
+  const catalogPayload = () => ({
+    account: catalogs.account,
+    models: catalogs.models,
+    collaborationModes: catalogs.collaborationModes,
+    defaultModel: config.defaultModel
+      ?? catalogs.models.find((model) => model.isDefault)?.id
+      ?? catalogs.models[0]?.id
+      ?? null,
+    defaultEffort: config.defaultEffort ?? null,
+    catalogsReady: catalogs.refreshedAt > 0,
+  });
+  const refreshCatalogs = (force = false) => {
+    const fresh = catalogs.refreshedAt && Date.now() - catalogs.refreshedAt < 10 * 60 * 1000;
+    if (!force && fresh) return Promise.resolve(catalogPayload());
+    if (catalogs.refreshPromise) return catalogs.refreshPromise;
+    catalogs.refreshPromise = Promise.all([
+      bridge.request('account/read', { refreshToken: false }).catch((error) => ({ error: error.message })),
+      bridge.request('model/list', { limit: 100, includeHidden: false }).catch(() => ({ data: [] })),
+      bridge.request('collaborationMode/list', {}).catch(() => ({ data: [] })),
+    ]).then(([account, models, collaborationModes]) => {
+      catalogs.account = account;
+      catalogs.models = models?.data ?? [];
+      catalogs.collaborationModes = collaborationModes?.data ?? [];
+      catalogs.refreshedAt = Date.now();
+      return catalogPayload();
+    }).finally(() => {
+      catalogs.refreshPromise = null;
+    });
+    return catalogs.refreshPromise;
+  };
   const threadMeta = new Map();
+  const rememberThread = (thread, fallbackCwd = null) => {
+    if (!thread?.id) return;
+    const previous = threadMeta.get(thread.id) ?? {};
+    threadMeta.set(thread.id, {
+      ...previous,
+      cwd: thread.cwd ?? fallbackCwd ?? previous.cwd,
+      path: thread.path ?? previous.path,
+      status: thread.status ?? previous.status,
+    });
+  };
+  const publishFavorites = (data = favorites.list()) => {
+    hub.publish('favorites', { data });
+    return data;
+  };
   if (typeof bridge.on === 'function') wireBridge(bridge, tracker, hub, config);
 
   const server = http.createServer(async (request, response) => {
@@ -389,33 +530,92 @@ export function createCodexMobileServer(options = {}) {
       requireSession(request, config);
       if (!['GET', 'HEAD'].includes(request.method)) assertSameOrigin(request);
 
+      if (request.method === 'GET' && pathname === '/api/favorites') {
+        json(response, 200, { data: favorites.list() });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/favorites/import') {
+        const body = await readBody(request, config.maxBodyBytes);
+        if (!Array.isArray(body.items)) throw new AppError('收藏列表格式不正确。', 400, 'INVALID_FAVORITES');
+        const imported = [];
+        for (const item of body.items.slice(0, 50)) {
+          try { imported.push(favoriteInput(item, config)); } catch (error) {
+            if (!(error instanceof AppError)) throw error;
+          }
+        }
+        json(response, 200, { data: publishFavorites(favorites.import(imported)) });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/favorites') {
+        const body = await readBody(request, config.maxBodyBytes);
+        json(response, 200, { data: publishFavorites(favorites.upsert(favoriteInput(body, config))) });
+        return;
+      }
+      const favoriteMatch = routeMatch(pathname, /^\/api\/favorites\/([^/]+)$/);
+      if (request.method === 'DELETE' && favoriteMatch) {
+        json(response, 200, { data: publishFavorites(favorites.remove(favoriteMatch[0])) });
+        return;
+      }
       if (request.method === 'GET' && pathname === '/api/skills') {
         json(response, 200, { data: listSkills(config) });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/files/resolve') {
+        const body = await readBody(request, config.maxBodyBytes);
+        const filePath = resolveLinkedPath(body.path, body.cwd, config);
+        json(response, 200, { artifact: linkedArtifact(filePath, config) });
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/skills/market') {
+        try {
+          const search = url.searchParams.get('search') ?? '';
+          json(response, 200, { data: await skillMarket.listCommunitySkills(search) });
+        } catch (error) {
+          throw new AppError(error.message || '技能市场加载失败', 502, 'SKILL_MARKET_ERROR');
+        }
+        return;
+      }
+      if (request.method === 'GET' && pathname === '/api/skills/market/official') {
+        try {
+          json(response, 200, { data: await skillMarket.listOfficialSkills() });
+        } catch (error) {
+          throw new AppError(error.message || '官方技能加载失败', 502, 'SKILL_OFFICIAL_ERROR');
+        }
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/skills/market/install') {
+        const body = await readBody(request, config.maxBodyBytes);
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        const repo = typeof body.repo === 'string' ? body.repo.trim() : '';
+        const skillPath = typeof body.path === 'string' ? body.path.trim() : '';
+        if (!repo && !name) throw new AppError('请提供技能名称或仓库地址。', 400, 'SKILL_SOURCE_REQUIRED');
+        try {
+          const result = repo
+            ? await skillMarket.installCommunitySkill({ repo, path: skillPath, name })
+            : await skillMarket.installOfficialSkill(name);
+          json(response, 200, result);
+        } catch (error) {
+          const wrapped = new AppError(error.message || '技能安装失败', 400, error?.code || 'SKILL_INSTALL_ERROR');
+          wrapped.data = error?.data;
+          throw wrapped;
+        }
         return;
       }
       if (request.method === 'GET' && pathname === '/api/events') {
         hub.connect(response, Number.parseInt(request.headers['last-event-id'] ?? '0', 10) || 0);
         return;
       }
+      if (request.method === 'GET' && pathname === '/api/catalogs') {
+        json(response, 200, await refreshCatalogs(url.searchParams.get('refresh') === '1'));
+        return;
+      }
       if (request.method === 'GET' && pathname === '/api/bootstrap') {
-        const [account, models, collaborationModes] = await Promise.all([
-          bridge.request('account/read', { refreshToken: false }).catch((error) => ({ error: error.message })),
-          bridge.request('model/list', { limit: 100, includeHidden: false }).catch(() => ({ data: [] })),
-          bridge.request('collaborationMode/list', {}).catch(() => ({ data: [] })),
-        ]);
-        catalogs.models = models?.data ?? [];
-        catalogs.collaborationModes = collaborationModes?.data ?? [];
+        void refreshCatalogs().catch((error) => log(config, 'debug', 'Catalog refresh failed', error.message));
         json(response, 200, {
-          account,
-          models: catalogs.models,
-          collaborationModes: catalogs.collaborationModes,
-          defaultModel: config.defaultModel
-            ?? catalogs.models.find((model) => model.isDefault)?.id
-            ?? catalogs.models[0]?.id
-            ?? null,
-          defaultEffort: config.defaultEffort ?? null,
+          ...catalogPayload(),
           appServer: bridge.status(),
           pendingRequests: bridge.getServerRequests(),
+          favorites: favorites.list(),
           projects: listProjects(config),
           runtime: {
             user: (() => { try { return os.userInfo().username; } catch { return config.targetUser; } })(),
@@ -428,13 +628,54 @@ export function createCodexMobileServer(options = {}) {
         json(response, 200, listProjects(config, url.searchParams.get('path')));
         return;
       }
+      if (request.method === 'POST' && pathname === '/api/projects/upload') {
+        const requestedDirectory = url.searchParams.get('path');
+        if (!requestedDirectory) throw new AppError('请选择上传目录。', 400, 'UPLOAD_DIRECTORY_REQUIRED');
+        const directory = validateProject(requestedDirectory, config);
+        const upload = await receiveUpload(request, {
+          directory,
+          fileName: url.searchParams.get('name'),
+          overwrite: url.searchParams.get('overwrite') === '1',
+          allowedRoots: config.allowedRoots,
+          maxBytes: config.maxFileBytes,
+        });
+        json(response, upload.overwritten ? 200 : 201, {
+          uploaded: true,
+          overwritten: upload.overwritten,
+          artifact: linkedArtifact(upload.path, config),
+        });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/projects/entries') {
+        const body = await readBody(request, config.maxBodyBytes);
+        const created = await createProjectEntry({
+          directory: body.directory,
+          name: body.name,
+          type: body.type,
+          content: body.content,
+          allowedRoots: config.allowedRoots,
+          maxContentBytes: config.maxBodyBytes,
+        });
+        json(response, 201, { created: true, artifact: linkedArtifact(created.path, config) });
+        return;
+      }
+      if (request.method === 'DELETE' && pathname === '/api/projects/entry') {
+        const body = await readBody(request, config.maxBodyBytes);
+        json(response, 200, await deleteProjectEntry({
+          targetPath: body.path,
+          confirmName: body.confirmName,
+          recursive: body.recursive === true,
+          allowedRoots: config.allowedRoots,
+        }));
+        return;
+      }
       if (request.method === 'GET' && pathname === '/api/threads') {
         const cwd = url.searchParams.get('cwd');
         const project = cwd ? validateProject(cwd, config) : null;
         const threads = await listThreads(bridge, config, project);
         for (const thread of threads) {
           tracker.registerThread(thread.id, thread.cwd);
-          threadMeta.set(thread.id, { cwd: thread.cwd });
+          rememberThread(thread);
         }
         json(response, 200, { data: threads });
         return;
@@ -452,7 +693,7 @@ export function createCodexMobileServer(options = {}) {
           ephemeral: false,
         });
         tracker.registerThread(result.thread.id, cwd);
-        threadMeta.set(result.thread.id, { cwd });
+        rememberThread(result.thread, cwd);
         json(response, 201, result);
         return;
       }
@@ -462,7 +703,7 @@ export function createCodexMobileServer(options = {}) {
         const result = await bridge.request('thread/read', { threadId: match[0], includeTurns: false });
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
         tracker.registerThread(result.thread.id, result.thread.cwd);
-        threadMeta.set(result.thread.id, { cwd: result.thread.cwd });
+        rememberThread(result.thread);
         json(response, 200, result);
         return;
       }
@@ -473,6 +714,7 @@ export function createCodexMobileServer(options = {}) {
         if (!name) throw new AppError('会话名称不能为空。', 400, 'NAME_REQUIRED');
         if (name.length > 100) throw new AppError('会话名称过长。', 400, 'NAME_TOO_LONG');
         const result = await bridge.request('thread/name/set', { threadId: match[0], name });
+        if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.rename(match[0], name));
         json(response, 200, result);
         return;
       }
@@ -480,6 +722,7 @@ export function createCodexMobileServer(options = {}) {
       if (request.method === 'POST' && match) {
         const result = await bridge.request('thread/delete', { threadId: match[0] });
         threadMeta.delete(match[0]);
+        if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.remove(match[0]));
         json(response, 200, { deleted: true, result });
         return;
       }
@@ -492,7 +735,7 @@ export function createCodexMobileServer(options = {}) {
         });
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
         tracker.registerThread(result.thread.id, result.cwd);
-        threadMeta.set(result.thread.id, { cwd: result.cwd });
+        rememberThread(result.thread, result.cwd);
         json(response, 200, result);
         return;
       }
@@ -501,14 +744,29 @@ export function createCodexMobileServer(options = {}) {
         const pageSize = Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') ?? '20', 10) || 20, 1), 50);
         const cursor = url.searchParams.get('cursor') || undefined;
         const sortDirection = url.searchParams.get('direction') === 'asc' ? 'asc' : 'desc';
-        const result = await bridge.request('thread/turns/list', {
+        let meta = threadMeta.get(match[0]);
+        if (!meta?.path) {
+          const read = await bridge.request('thread/read', { threadId: match[0], includeTurns: false });
+          if (!threadAllowed(read.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
+          rememberThread(read.thread);
+          meta = threadMeta.get(match[0]);
+        }
+        const result = isRolloutCursor(cursor) ? null : await bridge.request('thread/turns/list', {
           threadId: match[0],
           cursor,
           pageSize,
           sortDirection,
           itemsView: 'full',
         });
-        json(response, 200, { data: result?.data ?? [], nextCursor: result?.nextCursor ?? null });
+        const recovered = await rolloutHistory.resolvePage({
+          thread: meta,
+          nativeResult: result,
+          pageSize,
+          direction: sortDirection,
+          cursor,
+        });
+        const page = recovered ?? result ?? { data: [], nextCursor: null };
+        json(response, 200, { data: page.data ?? [], nextCursor: page.nextCursor ?? null });
         return;
       }
       if (request.method === 'POST' && match) {
@@ -530,7 +788,8 @@ export function createCodexMobileServer(options = {}) {
             threadId: match[0],
             developerInstructions: OWNER_INSTRUCTIONS,
           });
-          if (resumed.cwd) threadMeta.set(match[0], { cwd: resumed.cwd });
+          if (resumed.thread) rememberThread(resumed.thread, resumed.cwd);
+          else if (resumed.cwd) rememberThread({ id: match[0], cwd: resumed.cwd });
         } catch (error) {
           if (!isThreadGone(error)) throw error;
           recreated = true;
@@ -559,7 +818,7 @@ export function createCodexMobileServer(options = {}) {
               ephemeral: false,
             });
             activeThreadId = started.thread.id;
-            threadMeta.set(activeThreadId, { cwd });
+            rememberThread(started.thread, cwd);
             tracker.begin(activeThreadId, cwd);
             result = await bridge.request('turn/start', {
               threadId: activeThreadId,
@@ -602,7 +861,19 @@ export function createCodexMobileServer(options = {}) {
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/artifacts$/);
       if (request.method === 'GET' && match) {
-        json(response, 200, { data: tracker.list(match[0]) });
+        const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100, 1), 200);
+        const offset = Math.max(Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
+        const search = String(url.searchParams.get('search') ?? '').trim().toLowerCase();
+        const items = tracker.list(match[0]);
+        const filtered = search
+          ? items.filter((item) => `${item.name ?? ''} ${item.relativePath ?? ''}`.toLowerCase().includes(search))
+          : items;
+        const nextOffset = offset + limit < filtered.length ? offset + limit : null;
+        json(response, 200, {
+          data: filtered.slice(offset, offset + limit),
+          total: filtered.length,
+          nextOffset,
+        });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/requests') {
@@ -623,7 +894,15 @@ export function createCodexMobileServer(options = {}) {
       if (request.method === 'GET' && match) {
         const claims = verifyArtifactToken(match[0], config);
         const root = config.allowedRoots.find((item) => isInside(item, claims.path));
-        json(response, 200, { ...fileMetadata(claims.path, root), fileKind: classifyFile(claims.path) });
+        json(response, 200, fileMetadata(claims.path, root));
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/artifacts\/([^/]+)\/directory$/);
+      if (request.method === 'GET' && match) {
+        const claims = verifyArtifactToken(match[0], config);
+        const stat = fs.statSync(claims.path);
+        if (!stat.isDirectory()) throw new AppError('该路径不是目录。', 400, 'NOT_A_DIRECTORY');
+        json(response, 200, listDirectory(claims.path, config));
         return;
       }
       match = routeMatch(pathname, /^\/api\/artifacts\/([^/]+)\/related$/);
@@ -755,14 +1034,20 @@ export function createCodexMobileServer(options = {}) {
         ? error
         : new AppError(error.message || '服务出现内部错误。', 500, error.code || 'INTERNAL_ERROR');
       log(config, appError.statusCode >= 500 ? 'error' : 'debug', appError.message, error.stack ?? '');
-      if (!response.headersSent) json(response, appError.statusCode, { error: appError.code, message: appError.message });
+      if (!response.headersSent) {
+        json(response, appError.statusCode, {
+          error: appError.code,
+          message: appError.message,
+          ...(appError.data ? { data: appError.data } : {}),
+        });
+      }
       else response.destroy();
     } finally {
       log(config, 'debug', `${request.method} ${pathname}`, `${Date.now() - startedAt}ms`);
     }
   });
 
-  return { server, config, bridge, tracker, hub, dingtalk };
+  return { server, config, bridge, tracker, hub, dingtalk, skillMarket };
 }
 
 const isMain = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;

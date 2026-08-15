@@ -31,8 +31,12 @@ test('artifact tracker captures command-created files and limits ownership fixes
     assert.equal(artifacts[0].relativePath, 'report.md');
     assert.equal(artifacts[0].status, 'added');
     assert.equal(artifacts[0].available, true);
-    assert(calls.some((args) => args.includes(path.join(root, 'report.md'))));
-    assert(calls.some((args) => args[0] === '--check'));
+    if (process.getuid?.() === 0) {
+      assert(calls.some((args) => args.includes(path.join(root, 'report.md'))));
+      assert(calls.some((args) => args[0] === '--check'));
+    } else {
+      assert.deepEqual(calls, [], '桌面用户创建的文件不应触发所有权修复');
+    }
     assert.equal(hubEvents.at(-1).type, 'artifacts');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

@@ -3,7 +3,8 @@ import { api, post } from './js/http.js';
 import { escapeHtml, markdown, formatBytes, formatTime, formatDateTime, escapeAttribute } from './js/format.js';
 import { renderMermaid } from './js/mermaid-renderer.js';
 import { initKeyboardInsets } from './js/keyboard.js';
-import { initDingtalk, loadDingtalkMessages, startDingtalkPolling, stopDingtalkPolling } from './js/dingtalk.js';
+import { initDingtalk, initFileShare, loadDingtalkMessages, openFileShare, startDingtalkPolling, stopDingtalkPolling } from './js/dingtalk.js';
+import { initSkillMarket } from './js/skill-market.js';
 import { debug } from './js/debug.js';
 import {
   state,
@@ -73,14 +74,28 @@ async function copyText(text) {
 
 function showLogin() {
   state.events?.close();
+  $('#startupScreen').hidden = true;
   $('#app').hidden = true;
   $('#loginScreen').hidden = false;
   setTimeout(() => $('#pairCode').focus(), 50);
 }
 
+function showStartup(label = '正在恢复工作现场…') {
+  $('#startupScreen').querySelector('p').textContent = label;
+  $('#startupScreen').hidden = false;
+  $('#loginScreen').hidden = true;
+  $('#app').hidden = true;
+}
+
 function showApp() {
+  $('#startupScreen').hidden = true;
   $('#loginScreen').hidden = true;
   $('#app').hidden = false;
+  if (state.currentThread) {
+    const chat = $('#chatView');
+    chat.scrollTop = chat.scrollHeight;
+    scrollTimelineToBottom();
+  }
 }
 
 function setConnection(status, label) {
@@ -149,6 +164,16 @@ function updateFullscreenButton() {
   button.setAttribute('aria-label', active ? '退出全屏' : '全屏');
   button.setAttribute('title', active ? '退出全屏' : '全屏');
   button.setAttribute('aria-pressed', String(active));
+  const enterIcon = button.querySelector('#fullscreenIconEnter');
+  const exitIcon = button.querySelector('#fullscreenIconExit');
+  if (enterIcon) {
+    if (active) enterIcon.setAttribute('hidden', '');
+    else enterIcon.removeAttribute('hidden');
+  }
+  if (exitIcon) {
+    if (active) exitIcon.removeAttribute('hidden');
+    else exitIcon.setAttribute('hidden', '');
+  }
   document.body.classList.toggle('fullscreen-active', active);
 }
 
@@ -183,16 +208,14 @@ async function restoreUiState() {
   const savedThreadId = localStorage.getItem(UI_STATE.thread);
   const savedTab = sessionStorage.getItem(UI_STATE.tab);
   const savedDraft = sessionStorage.getItem(UI_STATE.draft) ?? '';
-  if (savedThreadId && state.threads.some((thread) => thread.id === savedThreadId)) {
+  if (savedThreadId) {
     try {
-      await openThread(savedThreadId);
+      const opened = await openThread(savedThreadId);
+      if (!opened) throw new Error('保存的会话无法恢复');
     } catch {
       localStorage.removeItem(UI_STATE.thread);
       sessionStorage.removeItem(UI_STATE.draft);
     }
-  } else if (savedThreadId) {
-    localStorage.removeItem(UI_STATE.thread);
-    sessionStorage.removeItem(UI_STATE.draft);
   }
   const activeView = document.querySelector('.view.active')?.dataset.view;
   if (['chat', 'threads', 'artifacts', 'projects', 'favorites'].includes(savedTab) && savedTab !== activeView) {
@@ -212,9 +235,15 @@ async function initialize() {
     showLogin();
     return;
   }
+  showStartup();
+  const { threadsPromise, favoritesPromise } = await loadBootstrap();
+  void loadRuntimeCatalogs();
+  await Promise.all([
+    threadsPromise.catch((error) => toast(error.message, 'error')),
+    favoritesPromise.catch((error) => toast(error.message, 'error')),
+    restoreUiState().catch((error) => toast(error.message, 'error')),
+  ]);
   showApp();
-  await loadBootstrap();
-  await restoreUiState().catch((error) => toast(error.message, 'error'));
   connectEvents();
   tryAutoFullscreen();
 }
@@ -231,21 +260,60 @@ async function loadBootstrap() {
   renderModels();
   renderModeControls();
   const initialProject = state.currentProject || state.bootstrap.projects.current.path;
-  await selectProject(initialProject, false);
-  renderProjects(state.bootstrap.projects);
+  state.currentProject = initialProject;
+  localStorage.setItem('codex-mobile-project', initialProject);
+  $('#currentProjectName').textContent = initialProject.split('/').filter(Boolean).at(-1) || initialProject;
+  if (initialProject === state.bootstrap.projects.current.path) renderProjects(state.bootstrap.projects);
+  else state.projectBrowser = null;
+  return {
+    threadsPromise: loadThreads(),
+    favoritesPromise: loadFavoriteThreads(state.bootstrap.favorites),
+  };
+}
+
+async function loadRuntimeCatalogs() {
+  try {
+    const result = await api('/api/catalogs');
+    if (!state.bootstrap) return;
+    state.bootstrap.account = result.account;
+    state.bootstrap.models = result.models ?? [];
+    state.bootstrap.collaborationModes = result.collaborationModes ?? [];
+    state.bootstrap.defaultModel = result.defaultModel ?? state.bootstrap.defaultModel;
+    state.bootstrap.defaultEffort = result.defaultEffort ?? state.bootstrap.defaultEffort;
+    renderModels();
+    renderModeControls();
+  } catch (error) {
+    debug.log('bootstrap', 'catalog-background-failed', { message: error.message });
+  }
 }
 
 function renderModels() {
   const select = $('#modelSelect');
   select.replaceChildren();
+  const availableModelIds = new Set();
   for (const model of state.bootstrap.models ?? []) {
     const id = model.id ?? model.model ?? model.slug;
     if (!id) continue;
+    availableModelIds.add(id);
     select.add(new Option(model.displayName ?? model.display_name ?? id, id));
   }
-  const saved = state.model && [...select.options].some((option) => option.value === state.model);
-  select.value = saved ? state.model
-    : (state.bootstrap?.defaultModel || state.bootstrap?.models?.[0]?.id || '');
+
+  const configuredDefault = state.bootstrap?.defaultModel || '';
+  const catalogDefault = availableModelIds.has(configuredDefault)
+    ? configuredDefault
+    : ([...availableModelIds][0] || configuredDefault);
+  const savedModelAvailable = Boolean(state.model && availableModelIds.has(state.model));
+
+  if (availableModelIds.size && state.model && !savedModelAvailable) {
+    state.model = null;
+    localStorage.removeItem('codex-mobile-model');
+  }
+
+  const selectedModel = savedModelAvailable ? state.model : catalogDefault;
+  if (selectedModel && !availableModelIds.has(selectedModel)) {
+    select.add(new Option(selectedModel, selectedModel));
+  }
+  select.value = selectedModel || '';
 }
 
 function effectiveModel() {
@@ -280,7 +348,7 @@ async function selectProject(projectPath, userInitiated = true) {
       state.selectedMentions = [];
       state.currentArtifact = null;
       localStorage.removeItem(UI_STATE.thread);
-      setArtifacts([]);
+      clearArtifactState();
       state.timelineVersion += 1;
       renderMentions();
       renderArtifacts();
@@ -307,10 +375,33 @@ async function selectProject(projectPath, userInitiated = true) {
   }
 }
 
+let projectBrowseSeq = 0;
+
 async function browseProjects(projectPath = '') {
+  const seq = ++projectBrowseSeq;
   const query = projectPath ? `?path=${encodeURIComponent(projectPath)}` : '';
   const data = await api(`/api/projects${query}`);
+  if (seq !== projectBrowseSeq) return;
   renderProjects(data);
+}
+
+function defaultFileBrowserPath() {
+  return state.currentThread?.cwd
+    ?? state.currentProject
+    ?? state.bootstrap?.projects?.current?.path
+    ?? '';
+}
+
+function openDefaultFileBrowser() {
+  const projectPath = defaultFileBrowserPath();
+  if (state.projectBrowser?.current?.path === projectPath) {
+    renderProjects(state.projectBrowser);
+    return;
+  }
+  $('#projectUpButton').hidden = true;
+  $('#projectPath').textContent = projectPath;
+  $('#projectList').innerHTML = '<div class="empty-list">正在读取当前会话目录…</div>';
+  browseProjects(projectPath).catch((error) => toast(error.message, 'error'));
 }
 
 function renderProjects(data) {
@@ -322,14 +413,314 @@ function renderProjects(data) {
   const choose = document.createElement('button');
   choose.className = 'project-button';
   choose.innerHTML = `<i>✓</i><span><strong>使用当前目录</strong><small>${escapeHtml(data.current.name)}</small></span><b>›</b>`;
+  choose.setAttribute('aria-label', `使用当前目录 ${data.current.name}，长按管理目录`);
+  bindLongPress(choose, () => showFileActions({ ...data.current, isDirectory: true, isCurrent: true }, choose));
   choose.addEventListener('click', () => selectProject(data.current.path));
   list.append(choose);
-  for (const project of data.entries) {
+  for (const entry of data.entries) {
+    const isDirectory = entry.isDirectory !== false;
     const button = document.createElement('button');
-    button.className = 'project-button';
-    button.innerHTML = `<i>⌁</i><span>${escapeHtml(project.name)}</span><b>›</b>`;
-    button.addEventListener('click', () => browseProjects(project.path).catch((error) => toast(error.message, 'error')));
-    list.append(button);
+    button.type = 'button';
+    button.className = `project-button${isDirectory ? '' : ' project-file'}`;
+    const details = isDirectory
+      ? '文件夹'
+      : `${artifactKindLabel(entry.fileKind)} · ${formatBytes(entry.size)}${entry.modifiedAt ? ` · ${formatTime(entry.modifiedAt)}` : ''}`;
+    button.innerHTML = `<i>${isDirectory ? '⌁' : escapeHtml(artifactKindLabel(entry.fileKind))}</i><span><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(details)}</small></span><b>›</b>`;
+    button.setAttribute('aria-label', isDirectory ? `进入文件夹 ${entry.name}，长按管理` : `预览文件 ${entry.name}，长按管理`);
+    bindLongPress(button, () => showFileActions(entry, button));
+    button.addEventListener('click', () => {
+      if (isDirectory) browseProjects(entry.path).catch((error) => toast(error.message, 'error'));
+      else openArtifact(entry);
+    });
+    if (isDirectory) {
+      list.append(button);
+    } else {
+      const row = document.createElement('div');
+      row.className = 'project-file-row';
+      const share = document.createElement('button');
+      share.type = 'button';
+      share.className = 'project-file-share';
+      share.textContent = '分享';
+      share.setAttribute('aria-label', `分享文件 ${entry.name}`);
+      share.addEventListener('click', () => openFileShare(entry));
+      row.append(button, share);
+      list.append(row);
+    }
+  }
+  if (data.truncated) {
+    const notice = document.createElement('div');
+    notice.className = 'project-truncated';
+    notice.textContent = '当前目录内容较多，显示前 300 项。';
+    list.append(notice);
+  }
+}
+
+let projectUploadInProgress = false;
+let pendingProjectUploadDirectory = null;
+
+function projectUploadButtons() {
+  return $$('#desktopUploadProjectFilesButton, #uploadProjectFilesButton');
+}
+
+function openProjectFilePicker(directory) {
+  if (!directory) {
+    toast('当前目录尚未加载完成。', 'error');
+    return;
+  }
+  pendingProjectUploadDirectory = directory;
+  $('#projectFileInput').click();
+}
+
+async function uploadProjectFile(file, directory, overwrite = false) {
+  const query = new URLSearchParams({ path: directory, name: file.name });
+  if (overwrite) query.set('overwrite', '1');
+  return api(`/api/projects/upload?${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  });
+}
+
+async function uploadProjectFiles(files, requestedDirectory = null) {
+  if (projectUploadInProgress || !files.length) return;
+  const directory = requestedDirectory ?? state.projectBrowser?.current?.path;
+  if (!directory) {
+    toast('当前目录尚未加载完成。', 'error');
+    return;
+  }
+
+  projectUploadInProgress = true;
+  const buttons = projectUploadButtons();
+  for (const button of buttons) button.disabled = true;
+  let uploaded = 0;
+  let skipped = 0;
+  const failures = [];
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      for (const button of buttons) button.textContent = `上传中 ${index + 1}/${files.length}`;
+      try {
+        await uploadProjectFile(file, directory);
+        uploaded += 1;
+      } catch (error) {
+        if (error.code === 'FILE_EXISTS') {
+          const overwrite = window.confirm(`“${file.name}”已经存在，是否覆盖？`);
+          if (!overwrite) {
+            skipped += 1;
+            continue;
+          }
+          try {
+            await uploadProjectFile(file, directory, true);
+            uploaded += 1;
+          } catch (overwriteError) {
+            failures.push(`${file.name}：${overwriteError.message}`);
+          }
+        } else {
+          failures.push(`${file.name}：${error.message}`);
+        }
+      }
+    }
+    if (uploaded && state.projectBrowser?.current?.path === directory) await browseProjects(directory);
+    if (uploaded) toast(uploaded === 1 ? '文件已上传。' : `${uploaded} 个文件已上传。`);
+    if (skipped) toast(`${skipped} 个同名文件未覆盖。`);
+    if (failures.length) toast(failures[0] + (failures.length > 1 ? `（另有 ${failures.length - 1} 个失败）` : ''), 'error');
+  } finally {
+    projectUploadInProgress = false;
+    for (const button of buttons) {
+      button.disabled = false;
+      button.textContent = '↑ 上传';
+    }
+  }
+}
+
+const LONG_PRESS_MS = 550;
+let fileActionTarget = null;
+let fileActionSource = null;
+
+function hideFileUploadPopover() {
+  $('#fileUploadPopover').hidden = true;
+  $('#fileDirectoryButton').setAttribute('aria-expanded', 'false');
+  if (fileActionSource) {
+    fileActionSource.classList.remove('context-active');
+    fileActionSource.setAttribute('aria-expanded', 'false');
+  }
+  fileActionSource = null;
+  fileActionTarget = null;
+}
+
+function showFileActions(target, source = null, anchor = 'entry') {
+  hideFileUploadPopover();
+  fileActionTarget = target;
+  fileActionSource = source;
+  const isDirectory = target?.isDirectory !== false;
+  const isCurrent = target?.isCurrent === true;
+  $('#fileActionTargetName').textContent = `${isCurrent ? '当前目录' : isDirectory ? '文件夹' : '文件'} · ${target?.name || target?.path || ''}`;
+  $('#uploadProjectFilesButton').hidden = !isDirectory;
+  $('#createProjectFileButton').hidden = !isDirectory;
+  $('#createProjectDirectoryButton').hidden = !isDirectory;
+  $('#deleteProjectEntryButton').hidden = isCurrent;
+  const visibleActions = $$('#fileUploadPopover .file-action-buttons > button:not([hidden])').length;
+  $('#fileUploadPopover .file-action-buttons').classList.toggle('single', visibleActions === 1);
+  $('#fileUploadPopover').dataset.anchor = anchor;
+  $('#fileUploadPopover').hidden = false;
+  if (source) {
+    source.classList.add('context-active');
+    source.setAttribute('aria-expanded', 'true');
+  }
+  $('#fileDirectoryButton').setAttribute('aria-expanded', anchor === 'nav' ? 'true' : 'false');
+  navigator.vibrate?.(12);
+}
+
+function showCurrentDirectoryActions() {
+  const alreadyBrowsingFiles = $('#projectsView').classList.contains('active');
+  const directory = alreadyBrowsingFiles
+    ? (state.projectBrowser?.current?.path ?? defaultFileBrowserPath())
+    : defaultFileBrowserPath();
+  showTab('projects');
+  showFileActions({ name: directory.split('/').filter(Boolean).at(-1) || directory, path: directory, isDirectory: true, isCurrent: true }, null, 'nav');
+}
+
+function bindLongPress(element, callback) {
+  let timer = null;
+  let start = null;
+  let suppressClick = false;
+  const cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    start = null;
+  };
+  element.setAttribute('aria-haspopup', 'menu');
+  element.setAttribute('aria-expanded', 'false');
+  element.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    cancel();
+    start = { x: event.clientX, y: event.clientY };
+    timer = setTimeout(() => {
+      timer = null;
+      suppressClick = true;
+      callback();
+    }, LONG_PRESS_MS);
+  });
+  element.addEventListener('pointermove', (event) => {
+    if (!timer || !start) return;
+    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 12) cancel();
+  });
+  element.addEventListener('pointerup', () => {
+    cancel();
+    if (suppressClick) setTimeout(() => { suppressClick = false; }, 120);
+  });
+  element.addEventListener('pointercancel', cancel);
+  element.addEventListener('contextmenu', (event) => event.preventDefault());
+  element.addEventListener('click', (event) => {
+    if (!suppressClick) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressClick = false;
+  });
+}
+
+let projectCreateType = 'file';
+let projectCreateDirectory = null;
+let projectDeleteTarget = null;
+
+function openProjectCreateDialog(type, directory) {
+  if (!directory) {
+    toast('目标目录尚未加载完成。', 'error');
+    return;
+  }
+  hideFileUploadPopover();
+  projectCreateType = type;
+  projectCreateDirectory = directory;
+  const isDirectory = type === 'directory';
+  $('#projectCreateTitle').textContent = isDirectory ? '新建文件夹' : '新建文件';
+  $('#projectCreatePath').textContent = directory;
+  $('#projectCreateName').value = '';
+  $('#projectCreateContent').value = '';
+  $('#projectCreateContentField').hidden = isDirectory;
+  $('#projectCreateDialog').showModal();
+  requestAnimationFrame(() => $('#projectCreateName').focus());
+}
+
+function closeProjectCreateDialog() {
+  $('#projectCreateDialog').close();
+  projectCreateDirectory = null;
+}
+
+async function confirmProjectCreate() {
+  const name = $('#projectCreateName').value.trim();
+  if (!projectCreateDirectory || !name) {
+    toast('请输入名称。', 'error');
+    return;
+  }
+  const button = $('#confirmProjectCreateButton');
+  button.disabled = true;
+  try {
+    await post('/api/projects/entries', {
+      directory: projectCreateDirectory,
+      name,
+      type: projectCreateType,
+      ...(projectCreateType === 'file' ? { content: $('#projectCreateContent').value } : {}),
+    });
+    const refreshDirectory = projectCreateDirectory;
+    closeProjectCreateDialog();
+    if (state.projectBrowser?.current?.path === refreshDirectory) await browseProjects(refreshDirectory);
+    toast(projectCreateType === 'directory' ? '文件夹已创建。' : '文件已创建。');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openProjectDeleteDialog(target) {
+  if (target?.isCurrent) return;
+  if (!target?.path) {
+    hideFileUploadPopover();
+    toast('无法识别删除目标，请刷新文件目录后重试。', 'error');
+    return;
+  }
+  hideFileUploadPopover();
+  projectDeleteTarget = target;
+  const isDirectory = target.isDirectory !== false;
+  const currentCwd = state.currentThread?.cwd;
+  const currentWarning = currentCwd === target.path ? ' 这是当前会话的工作目录，删除后该会话可能无法继续执行。' : '';
+  $('#projectDeleteMessage').textContent = isDirectory
+    ? `确定删除文件夹“${target.name}”以及其中的全部内容吗？${currentWarning}`
+    : `确定删除文件“${target.name}”吗？`;
+  $('#projectDeleteDialog').showModal();
+}
+
+function closeProjectDeleteDialog() {
+  $('#projectDeleteDialog').close();
+  projectDeleteTarget = null;
+}
+
+async function confirmProjectDelete() {
+  const target = projectDeleteTarget;
+  if (!target) return;
+  const button = $('#confirmProjectDeleteButton');
+  button.disabled = true;
+  try {
+    const result = await api('/api/projects/entry', {
+      method: 'DELETE',
+      body: JSON.stringify({
+        path: target.path,
+        confirmName: target.name,
+        recursive: target.isDirectory !== false,
+      }),
+    });
+    closeProjectDeleteDialog();
+    if (state.currentProject === target.path) {
+      state.currentProject = result.parent;
+      localStorage.setItem('codex-mobile-project', result.parent);
+      $('#currentProjectName').textContent = result.parent.split('/').filter(Boolean).at(-1) || result.parent;
+    }
+    if (state.projectBrowser?.current?.path === result.parent) await browseProjects(result.parent);
+    toast(target.isDirectory !== false ? '文件夹已删除。' : '文件已删除。');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -341,8 +732,9 @@ async function loadThreads() {
 }
 
 const FAVORITES_KEY = 'codex-mobile-favorite-threads';
+const FAVORITES_MIGRATION_KEY = 'codex-mobile-favorites-server-v1';
 
-function favoriteThreads() {
+function legacyFavoriteThreads() {
   try {
     const parsed = JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]');
     return Array.isArray(parsed) ? parsed : [];
@@ -351,22 +743,55 @@ function favoriteThreads() {
   }
 }
 
-function saveFavoriteThreads(items) {
-  localStorage.setItem(FAVORITES_KEY, JSON.stringify(items.slice(0, 50)));
+function setFavoriteThreads(items) {
+  const unique = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item?.id || unique.has(item.id)) continue;
+    unique.set(item.id, item);
+  }
+  state.favoriteThreads = [...unique.values()].slice(0, 50);
+}
+
+function favoriteThreads() {
+  return state.favoriteThreads;
+}
+
+async function loadFavoriteThreads(bootstrapFavorites) {
+  const initial = Array.isArray(bootstrapFavorites)
+    ? bootstrapFavorites
+    : (await api('/api/favorites')).data;
+  setFavoriteThreads(initial);
+  const legacy = legacyFavoriteThreads();
+  if (!localStorage.getItem(FAVORITES_MIGRATION_KEY) && legacy.length) {
+    const result = await post('/api/favorites/import', { items: legacy });
+    setFavoriteThreads(result.data);
+    localStorage.removeItem(FAVORITES_KEY);
+    localStorage.setItem(FAVORITES_MIGRATION_KEY, '1');
+  }
+  renderThreads();
+  renderFavorites();
+}
+
+async function upsertFavoriteThread(item) {
+  const result = await post('/api/favorites', item);
+  setFavoriteThreads(result.data);
+}
+
+async function removeFavoriteThread(threadId) {
+  const result = await api(`/api/favorites/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
+  setFavoriteThreads(result.data);
 }
 
 function isThreadFavorite(threadId) {
   return favoriteThreads().some((item) => item.id === threadId);
 }
 
-function toggleThreadFavorite(thread) {
-  const current = favoriteThreads();
-  const index = current.findIndex((item) => item.id === thread.id);
-  if (index >= 0) {
-    current.splice(index, 1);
+async function toggleThreadFavorite(thread) {
+  if (isThreadFavorite(thread.id)) {
+    await removeFavoriteThread(thread.id);
     toast('已取消收藏');
   } else {
-    current.unshift({
+    await upsertFavoriteThread({
       id: thread.id,
       name: thread.name || thread.preview || '未命名会话',
       cwd: thread.cwd || state.currentProject,
@@ -374,7 +799,6 @@ function toggleThreadFavorite(thread) {
     });
     toast('已收藏');
   }
-  saveFavoriteThreads(current);
   renderThreads();
   renderFavorites();
 }
@@ -405,13 +829,16 @@ function renderFavorites() {
     item.className = `thread-item ${state.currentThread?.id === favorite.id ? 'active' : ''}`;
     const name = favorite.name || '未命名会话';
     item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(favorite.cwd ?? '')}</small></span><button type="button" class="thread-star on" aria-label="取消收藏" title="取消收藏">★</button>`;
-    item.addEventListener('click', (event) => {
+    item.addEventListener('click', async (event) => {
       if (event.target.closest('.thread-star')) {
-        const current = favoriteThreads().filter((entry) => entry.id !== favorite.id);
-        saveFavoriteThreads(current);
-        toast('已取消收藏');
-        renderThreads();
-        renderFavorites();
+        try {
+          await removeFavoriteThread(favorite.id);
+          toast('已取消收藏');
+          renderThreads();
+          renderFavorites();
+        } catch (error) {
+          toast(error.message, 'error');
+        }
         return;
       }
       openFavoriteThread(favorite);
@@ -455,8 +882,7 @@ async function confirmThreadRename() {
     if (state.currentThread?.id === thread.id) state.currentThread.name = name;
     const index = state.threads.findIndex((item) => item.id === thread.id);
     if (index >= 0) state.threads[index] = { ...state.threads[index], name };
-    const favorites = favoriteThreads().map((entry) => entry.id === thread.id ? { ...entry, name, updatedAt: Date.now() } : entry);
-    saveFavoriteThreads(favorites);
+    setFavoriteThreads(favoriteThreads().map((entry) => entry.id === thread.id ? { ...entry, name, updatedAt: Date.now() } : entry));
     $('#threadRenameDialog').close();
     state.threadAction = null;
     renderThreads();
@@ -478,7 +904,7 @@ async function confirmThreadDeleteOk() {
   try {
     await post(`/api/threads/${encodeURIComponent(thread.id)}/delete`, {});
     state.threads = state.threads.filter((item) => item.id !== thread.id);
-    saveFavoriteThreads(favoriteThreads().filter((entry) => entry.id !== thread.id));
+    setFavoriteThreads(favoriteThreads().filter((entry) => entry.id !== thread.id));
     if (state.currentThread?.id === thread.id) {
       state.currentThread = null;
       state.turns = [];
@@ -518,7 +944,7 @@ function renderThreads() {
       item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(formatTime(thread.updatedAt))} · ${escapeHtml(status)}</small></span><button type="button" class="thread-star${starred ? ' on' : ''}" aria-label="${starred ? '取消收藏' : '收藏'}" title="${starred ? '取消收藏' : '收藏'}">${starred ? '★' : '☆'}</button><button type="button" class="thread-more" aria-label="会话操作" title="会话操作">⋯</button>`;
       item.addEventListener('click', (event) => {
         if (event.target.closest('.thread-star')) {
-          toggleThreadFavorite(thread);
+          toggleThreadFavorite(thread).catch((error) => toast(error.message, 'error'));
           return;
         }
         if (event.target.closest('.thread-more')) {
@@ -545,6 +971,8 @@ async function newThread() {
     });
     state.currentThread = result.thread;
     state.turns = result.thread.turns ?? [];
+    state.turnsNextCursor = null;
+    clearArtifactState();
     state.timelineVersion += 1;
     state.questionCursor = 0;
     state.activeTurnId = null;
@@ -559,16 +987,44 @@ async function newThread() {
   }
 }
 
-function setArtifacts(next) {
+function setArtifacts(next, options = {}) {
   if (!sameArtifactSet(state.artifacts, next)) {
     state.artifacts = next;
     state.artifactsVersion += 1;
-    state.timelineVersion += 1;
-    state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
+    if (options.resetPaging !== false) state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
     return true;
   }
   state.artifacts = next;
   return false;
+}
+
+function clearArtifactState() {
+  state.artifactRequestSeq += 1;
+  setArtifacts([]);
+  state.artifactsThreadId = null;
+  state.artifactsTotal = 0;
+  state.artifactsNextOffset = null;
+  state.artifactSearchResults = null;
+  state.artifactSearchTotal = 0;
+  state.artifactSearchNextOffset = null;
+  state.artifactSearchLoading = false;
+  state.artifactsLoadingMore = false;
+  state.artifactQuery = '';
+  state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
+  state.artifactsRenderedVersion = -1;
+  const search = $('#artifactSearch');
+  if (search) search.value = '';
+}
+
+function threadStatusType(thread) {
+  const value = thread?.status;
+  if (typeof value === 'string') return value;
+  return typeof value?.type === 'string' ? value.type : null;
+}
+
+function activeTurnFromSnapshot(thread, turns) {
+  if (['idle', 'notLoaded'].includes(threadStatusType(thread))) return null;
+  return [...turns].reverse().find((turn) => turn.status === 'inProgress')?.id ?? null;
 }
 
 function applyThreadData(thread, turns, seq = state.threadLoadSeq) {
@@ -581,8 +1037,7 @@ function applyThreadData(thread, turns, seq = state.threadLoadSeq) {
   state.timelineVersion += 1;
   state.questionCursor = 0;
   state.turnModes.clear();
-  const active = turns.find((turn) => turn.status === 'inProgress');
-  state.activeTurnId = active?.id ?? null;
+  state.activeTurnId = activeTurnFromSnapshot(thread, turns);
   state.pinnedToBottom = true;
   updateScrollLatestButton();
   renderTimeline();
@@ -597,7 +1052,11 @@ async function openThread(threadId) {
   showTab('chat');
   const cached = state.threadCache.get(threadId);
   if (cached) {
+    clearArtifactState();
     setArtifacts(cached.artifacts ?? []);
+    state.artifactsThreadId = threadId;
+    state.artifactsTotal = cached.artifactsTotal ?? state.artifacts.length;
+    state.artifactsNextOffset = cached.artifactsNextOffset ?? null;
     renderArtifacts();
     state.turnsNextCursor = cached.turnsNextCursor ?? null;
     applyThreadData(cached.thread, cached.turns, seq);
@@ -605,21 +1064,21 @@ async function openThread(threadId) {
     updateLoadOlderButton();
     post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
     refreshCurrentThread({ seq }).catch(() => {});
-    return;
+    return true;
   }
   showThreadLoading();
   try {
     const read = await api(`/api/threads/${encodeURIComponent(threadId)}`);
-    if (seq !== state.threadLoadSeq) return;
+    if (seq !== state.threadLoadSeq) return false;
     const fullTurns = read.thread.turns ?? [];
-    setArtifacts([]);
+    clearArtifactState();
     let page = null;
     try {
       page = await fetchTurnPage(threadId);
     } catch {
       page = null;
     }
-    if (seq !== state.threadLoadSeq) return;
+    if (seq !== state.threadLoadSeq) return false;
     const turns = page && page.turnsAsc.length ? page.turnsAsc : fullTurns;
     state.turnsNextCursor = page && page.turnsAsc.length ? page.nextCursor : null;
     cacheThread(threadId, {
@@ -635,7 +1094,11 @@ async function openThread(threadId) {
     try {
       await loadArtifacts(threadId);
       const entry = state.threadCache.get(threadId);
-      if (entry && state.currentThread?.id === threadId) entry.artifacts = state.artifacts.slice();
+      if (entry && state.currentThread?.id === threadId) {
+        entry.artifacts = state.artifacts.slice();
+        entry.artifactsTotal = state.artifactsTotal;
+        entry.artifactsNextOffset = state.artifactsNextOffset;
+      }
     } catch (error) {
       toast(error.message, 'error');
     } finally {
@@ -645,11 +1108,13 @@ async function openThread(threadId) {
         debug.log('thread', 'open-complete', { threadId });
       }
     }
+    return true;
   } catch (error) {
     if (seq === state.threadLoadSeq) {
       hideThreadLoading();
       toast(error.message, 'error');
     }
+    return false;
   }
 }
 
@@ -685,21 +1150,20 @@ async function refreshCurrentThread(options = {}) {
       const merged = mergeTurns(state.turns, incoming, 'refresh');
       const metaChanged = state.currentThread.updatedAt !== read.thread.updatedAt
         || state.currentThread.name !== read.thread.name
-        || state.currentThread.status !== read.thread.status;
+        || threadStatusType(state.currentThread) !== threadStatusType(read.thread);
       state.currentThread = read.thread;
       state.currentProject = read.thread.cwd;
       localStorage.setItem('codex-mobile-project', state.currentProject);
       $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
-      if (!merged.changed && !metaChanged) {
-        renderThreads();
-        return;
+      if (merged.changed || metaChanged) {
+        state.turns = merged.turns;
+        state.activeTurnId = activeTurnFromSnapshot(read.thread, state.turns);
+        if (page && page.turnsAsc.length) state.turnsNextCursor = page.nextCursor;
+        state.timelineVersion += 1;
+        renderTimeline();
+        updateLoadOlderButton();
       }
-      state.turns = merged.turns;
-      if (page && page.turnsAsc.length) state.turnsNextCursor = page.nextCursor;
-      state.timelineVersion += 1;
-      renderTimeline();
       renderThreads();
-      updateLoadOlderButton();
       const entry = state.threadCache.get(threadId);
       if (entry) {
         entry.thread = read.thread;
@@ -708,7 +1172,11 @@ async function refreshCurrentThread(options = {}) {
         entry.cachedAt = Date.now();
       }
       await loadArtifacts(threadId);
-      if (entry && state.currentThread?.id === threadId) entry.artifacts = state.artifacts.slice();
+      if (entry && state.currentThread?.id === threadId) {
+        entry.artifacts = state.artifacts.slice();
+        entry.artifactsTotal = state.artifactsTotal;
+        entry.artifactsNextOffset = state.artifactsNextOffset;
+      }
       saveUiState();
     } finally {
       if (refreshPromise === run) refreshPromise = null;
@@ -858,11 +1326,16 @@ function approvalTitle(method) {
   if (method.includes('fileChange') || method === 'applyPatchApproval') return '允许修改文件？';
   if (method.includes('permissions')) return 'Codex 需要额外权限';
   if (method.includes('requestUserInput')) return 'Codex 正在等你的回答';
+  if (method === 'mcpServer/elicitation/request') return 'MCP 服务请求确认';
   return 'Codex 请求确认';
 }
 
 function isQuestionRequest(request) {
   return request?.method === 'item/tool/requestUserInput' || request?.method?.endsWith('/requestUserInput');
+}
+
+function isMcpElicitationRequest(request) {
+  return request?.method === 'mcpServer/elicitation/request';
 }
 
 function questionHtml(question, requestId) {
@@ -903,7 +1376,7 @@ function renderApprovals() {
     const autoResolution = params.autoResolutionMs
       ? `若不回答，Codex 会在约 ${Math.ceil(params.autoResolutionMs / 1000)} 秒后自行继续。`
       : '';
-    const summary = params.reason || params.cwd || autoResolution || '请在手机端确认后，Codex 才会继续。';
+    const summary = params.message || params.reason || params.cwd || autoResolution || '请在手机端确认后，Codex 才会继续。';
     card.innerHTML = `<div class="approval-head"><span class="approval-symbol">!</span><div><h3>${escapeHtml(approvalTitle(request.method))}</h3><p>${escapeHtml(summary)}</p></div></div>${command ? `<div class="approval-command">${escapeHtml(command)}</div>` : ''}${questions}<div class="approval-actions"></div>`;
     const actions = card.querySelector('.approval-actions');
     if (questionRequest) {
@@ -911,7 +1384,7 @@ function renderApprovals() {
     } else {
       actions.append(actionButton('拒绝', 'decline'));
       actions.append(actionButton('本次允许', 'accept', true));
-      actions.append(actionButton('本会话允许', 'acceptForSession'));
+      if (!isMcpElicitationRequest(request)) actions.append(actionButton('本会话允许', 'acceptForSession'));
     }
     for (const button of actions.querySelectorAll('button')) {
       button.addEventListener('click', () => respondApproval(request, button.dataset.action, card));
@@ -1000,18 +1473,81 @@ function sameArtifactSet(left, right) {
   return true;
 }
 
-async function loadArtifacts(expectedThreadId = state.currentThread?.id) {
+function mergeArtifactPage(current, incoming) {
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...incoming.filter((item) => !seen.has(item.id))];
+}
+
+async function loadArtifacts(expectedThreadId = state.currentThread?.id, options = {}) {
   if (!expectedThreadId) {
-    setArtifacts([]);
+    clearArtifactState();
     renderArtifacts();
     return;
   }
-  const result = await api(`/api/threads/${encodeURIComponent(expectedThreadId)}/artifacts`);
-  if (expectedThreadId !== state.currentThread?.id) return;
-  const next = result.data ?? [];
-  setArtifacts(next);
-  renderArtifacts();
-  refreshTimelineAfterArtifacts();
+  const append = options.append === true;
+  const offset = append ? state.artifactsNextOffset : 0;
+  if (append && offset == null) return;
+  const seq = ++state.artifactRequestSeq;
+  state.artifactsLoadingMore = append;
+  const query = new URLSearchParams({ limit: '100', offset: String(offset ?? 0) });
+  try {
+    const result = await api(`/api/threads/${encodeURIComponent(expectedThreadId)}/artifacts?${query}`);
+    if (expectedThreadId !== state.currentThread?.id || seq !== state.artifactRequestSeq) return;
+    const next = result.data ?? [];
+    setArtifacts(append ? mergeArtifactPage(state.artifacts, next) : next, { resetPaging: !append });
+    state.artifactsThreadId = expectedThreadId;
+    state.artifactsTotal = Number.isFinite(result.total) ? result.total : state.artifacts.length;
+    state.artifactsNextOffset = Number.isFinite(result.nextOffset) ? result.nextOffset : null;
+    refreshTimelineAfterArtifacts();
+  } finally {
+    if (seq === state.artifactRequestSeq) {
+      state.artifactsLoadingMore = false;
+      state.artifactsRenderedVersion = -1;
+      renderArtifacts();
+    }
+  }
+}
+
+async function loadArtifactSearch(queryText, options = {}) {
+  const queryTextTrimmed = queryText.trim();
+  if (!queryTextTrimmed || !state.currentThread) {
+    state.artifactSearchResults = null;
+    state.artifactSearchTotal = 0;
+    state.artifactSearchNextOffset = null;
+    state.artifactsRenderedVersion = -1;
+    renderArtifacts();
+    return;
+  }
+  const append = options.append === true;
+  const offset = append ? state.artifactSearchNextOffset : 0;
+  if (append && offset == null) return;
+  const threadId = state.currentThread.id;
+  const seq = ++state.artifactRequestSeq;
+  state.artifactsLoadingMore = append;
+  if (!append) {
+    state.artifactSearchResults = [];
+    state.artifactSearchLoading = true;
+    state.artifactsRenderedVersion = -1;
+    renderArtifacts();
+  }
+  try {
+    const query = new URLSearchParams({ search: queryTextTrimmed, limit: '100', offset: String(offset ?? 0) });
+    const result = await api(`/api/threads/${encodeURIComponent(threadId)}/artifacts?${query}`);
+    if (threadId !== state.currentThread?.id || queryTextTrimmed !== state.artifactQuery.trim() || seq !== state.artifactRequestSeq) return;
+    const incoming = result.data ?? [];
+    state.artifactSearchResults = append
+      ? mergeArtifactPage(state.artifactSearchResults ?? [], incoming)
+      : incoming;
+    state.artifactSearchTotal = Number.isFinite(result.total) ? result.total : state.artifactSearchResults.length;
+    state.artifactSearchNextOffset = Number.isFinite(result.nextOffset) ? result.nextOffset : null;
+  } finally {
+    if (seq === state.artifactRequestSeq) {
+      state.artifactSearchLoading = false;
+      state.artifactsLoadingMore = false;
+      state.artifactsRenderedVersion = -1;
+      renderArtifacts();
+    }
+  }
 }
 
 function rankArtifacts(artifacts) {
@@ -1039,26 +1575,27 @@ function createArtifactCard(artifact) {
   card.innerHTML = `
     <div class="artifact-card-main"><strong title="${escapeHtml(artifact.name)}">${escapeHtml(artifact.name)}</strong><span class="artifact-kind">${escapeHtml(artifactKindLabel(artifact.fileKind))}</span></div>
     ${modifiedText ? `<small class="artifact-time">修改于 ${escapeHtml(modifiedText)}</small>` : ''}
-    <div class="artifact-actions"><button data-action="send-dingtalk" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>发给自己</button><button data-action="preview" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>预览</button></div>`;
+    <div class="artifact-actions"><button data-action="share" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>分享</button><button data-action="preview" data-artifact-id="${escapeHtml(artifact.id)}" ${artifact.available ? '' : 'disabled'}>预览</button></div>`;
   return card;
 }
 
 function renderArtifacts() {
   const list = $('#artifactList');
   const query = state.artifactQuery.trim().toLowerCase();
-  const renderKey = `${query}|${state.artifactOtherShown}`;
+  const renderKey = `${query}|${state.artifactOtherShown}|${state.artifactsNextOffset}|${state.artifactSearchNextOffset}|${state.artifactsLoadingMore}`;
   if (state.artifactsRenderedVersion === state.artifactsVersion && state.artifactsRenderKey === renderKey) return;
   state.artifactsRenderKey = renderKey;
   state.artifactsRenderedVersion = state.artifactsVersion;
   list.replaceChildren();
-  $('#artifactBadge').hidden = !state.artifacts.length;
-  if (!state.artifacts.length) {
-    list.innerHTML = '<div class="empty-list">当前会话还没有可展示的产出物。<br>Codex 修改或生成文件后会自动出现在这里。</div>';
+  $('#artifactBadge').hidden = !(state.artifactsTotal || state.artifacts.length);
+  const items = query ? (state.artifactSearchResults ?? []) : state.artifacts;
+  if (!items.length && state.artifactSearchLoading) {
+    list.innerHTML = '<div class="empty-list">正在搜索产出物…</div>';
     return;
   }
-  let items = state.artifacts;
-  if (query) {
-    items = items.filter((artifact) => `${artifact.name} ${artifact.relativePath ?? ''}`.toLowerCase().includes(query));
+  if (!items.length && !query) {
+    list.innerHTML = '<div class="empty-list">当前会话还没有可展示的产出物。<br>Codex 修改或生成文件后会自动出现在这里。</div>';
+    return;
   }
   if (!items.length) {
     list.innerHTML = `<div class="empty-list">没有匹配“${escapeHtml(state.artifactQuery.trim())}”的产出物。<br>换个关键词试试。</div>`;
@@ -1086,6 +1623,19 @@ function renderArtifacts() {
       more.textContent = `还有 ${entries.length - shown.length} 条 · 显示更多`;
       list.append(more);
     }
+  }
+  const nextOffset = query ? state.artifactSearchNextOffset : state.artifactsNextOffset;
+  const total = query ? state.artifactSearchTotal : state.artifactsTotal;
+  if (nextOffset != null) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'artifact-more';
+    more.dataset.action = 'load-more';
+    more.disabled = state.artifactsLoadingMore;
+    more.textContent = state.artifactsLoadingMore
+      ? '正在加载…'
+      : `继续加载 · 已加载 ${items.length}/${total}`;
+    list.append(more);
   }
 }
 
@@ -1115,23 +1665,89 @@ function rewriteArtifactUrls(html, token) {
     });
 }
 
+function isLocalArtifactHref(href) {
+  const value = String(href ?? '').trim();
+  if (!value || value.startsWith('#') || value.startsWith('/api/')) return false;
+  if (/^(?:https?:|mailto:|tel:|data:|blob:)/i.test(value)) return false;
+  return value.startsWith('/') || value.startsWith('./') || value.startsWith('../') || value.startsWith('file:');
+}
+
+async function openLinkedArtifact(href) {
+  const result = await post('/api/files/resolve', {
+    path: href,
+    cwd: state.currentProject,
+  });
+  if (!result.artifact) throw new Error('文件链接解析失败');
+  await openArtifact(result.artifact);
+}
+
+function createDirectoryEntry(item, label = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'directory-entry';
+  const icon = document.createElement('i');
+  icon.textContent = item.isDirectory ? '▰' : '◇';
+  const content = document.createElement('span');
+  const name = document.createElement('strong');
+  name.textContent = label || item.name;
+  const details = document.createElement('small');
+  details.textContent = item.isDirectory
+    ? '目录'
+    : `${artifactKindLabel(item.fileKind)} · ${formatBytes(item.size)}`;
+  const arrow = document.createElement('b');
+  arrow.textContent = '›';
+  content.append(name, details);
+  button.append(icon, content, arrow);
+  button.addEventListener('click', () => openArtifact(item));
+  return button;
+}
+
+async function renderDirectoryPreview(token, body) {
+  const result = await api(`/api/artifacts/${token}/directory`);
+  body.className = 'preview-body directory-preview';
+  body.replaceChildren();
+  const list = document.createElement('div');
+  list.className = 'directory-list';
+  if (result.parent) list.append(createDirectoryEntry(result.parent, '返回上一级'));
+  for (const item of result.data ?? []) list.append(createDirectoryEntry(item));
+  if (!list.children.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-list';
+    empty.textContent = '这个目录是空的';
+    list.append(empty);
+  }
+  body.append(list);
+  if (result.truncated) {
+    const notice = document.createElement('div');
+    notice.className = 'document-truncated';
+    notice.textContent = '目录内容较多，当前显示前 500 项。';
+    body.append(notice);
+  }
+}
+
 async function openArtifact(artifact) {
   if (!artifact.token) return;
   const body = $('#previewBody');
+  state.currentArtifact = null;
+  $('#sharePreviewButton').hidden = true;
   try {
     const token = encodeURIComponent(artifact.token);
     const meta = await api(`/api/artifacts/${token}/meta`);
-    state.currentArtifact = artifact;
-    $('#previewKind').textContent = `${meta.fileKind} · ${formatBytes(meta.size)}`;
+    state.currentArtifact = { ...artifact, ...meta, token: artifact.token };
+    $('#previewKind').textContent = meta.isDirectory ? '目录' : `${meta.fileKind} · ${formatBytes(meta.size)}`;
     $('#previewTitle').textContent = meta.name;
     const raw = `/api/artifacts/${token}/raw`;
     body.className = 'preview-body';
     body.replaceChildren();
     body.innerHTML = '<div class="preview-loading"><span></span>正在准备预览…</div>';
+    $('#downloadArtifactButton').hidden = Boolean(meta.isDirectory);
+    $('#sharePreviewButton').hidden = Boolean(meta.isDirectory);
     $('#downloadArtifactButton').href = `${raw}?download=1`;
     $('#downloadArtifactButton').download = meta.name;
     if (!$('#previewDialog').open) $('#previewDialog').showModal();
-    if (meta.fileKind === 'markdown' || meta.fileKind === 'text') {
+    if (meta.isDirectory) {
+      await renderDirectoryPreview(token, body);
+    } else if (meta.fileKind === 'markdown' || meta.fileKind === 'text') {
       const response = await fetch(raw, { credentials: 'same-origin' });
       if (!response.ok) {
         const problem = await response.json().catch(() => ({}));
@@ -1385,18 +2001,6 @@ function modifyCurrentArtifact() {
   $('#promptInput').focus();
 }
 
-async function sendArtifactToDingtalk(artifact) {
-  if (!artifact?.token || !artifact.available) return;
-  const confirmed = window.confirm(`确认把「${artifact.name}」发送到钉钉给自己？`);
-  if (!confirmed) return;
-  try {
-    await post(`/api/artifacts/${encodeURIComponent(artifact.token)}/send-dingtalk`, {});
-    toast(`已发送「${artifact.name}」到钉钉`);
-  } catch (error) {
-    toast(error.message, 'error');
-  }
-}
-
 function renderMentions() {
   const tray = $('#mentionTray');
   tray.replaceChildren();
@@ -1529,10 +2133,15 @@ async function interruptTurn() {
 function showTab(name) {
   $$('.view').forEach((view) => view.classList.toggle('active', view.dataset.view === name));
   $$('.bottom-nav button').forEach((button) => button.classList.toggle('active', button.dataset.tab === name));
-  if (name === 'chat') renderTimeline(false);
+  if (name === 'chat') {
+    renderTimeline(false);
+    updateTurnArtifactsStrips();
+  }
   if (name === 'favorites') renderFavorites();
-  if (name === 'artifacts') loadArtifacts().catch((error) => toast(error.message, 'error'));
-  if (name === 'projects' && state.projectBrowser) renderProjects(state.projectBrowser);
+  if (name === 'artifacts' && state.currentThread && state.artifactsThreadId !== state.currentThread.id) {
+    loadArtifacts().catch((error) => toast(error.message, 'error'));
+  }
+  if (name === 'projects') openDefaultFileBrowser();
   if (name === 'dingtalk') {
     loadDingtalkMessages(true).catch((error) => toast(error.message, 'error'));
     startDingtalkPolling();
@@ -1564,11 +2173,16 @@ function connectEvents() {
     setConnection(status.ready ? 'online' : 'connecting', status.ready ? '已连接' : 'Codex 重启中');
   });
   events.addEventListener('bridge-error', (event) => toast(JSON.parse(event.data).message, 'error'));
+  events.addEventListener('favorites', (event) => {
+    setFavoriteThreads(JSON.parse(event.data).data);
+    renderThreads();
+    renderFavorites();
+  });
   events.addEventListener('codex', (event) => handleCodex(JSON.parse(event.data)));
   events.addEventListener('approval', (event) => {
     const request = JSON.parse(event.data);
     state.approvals.set(request.id, request);
-    for (const selector of ['#settingsSheet', '#skillSheet', '#previewDialog']) {
+    for (const selector of ['#settingsSheet', '#skillSheet', '#previewDialog', '#fileShareDialog']) {
       const dialog = $(selector);
       if (dialog?.open) dialog.close();
     }
@@ -1586,9 +2200,13 @@ function connectEvents() {
     if (data.threadId === state.currentThread?.id) {
       const incoming = data.items ?? [];
       if (!incoming.length) return;
+      const existingIds = new Set(state.artifacts.map((item) => item.id));
+      const addedCount = incoming.filter((item) => !existingIds.has(item.id)).length;
       const seen = new Set(incoming.map((item) => item.id));
       const next = [...incoming, ...state.artifacts.filter((item) => !seen.has(item.id))];
-      if (setArtifacts(next)) {
+      if (setArtifacts(next, { resetPaging: false })) {
+        state.artifactsThreadId = data.threadId;
+        state.artifactsTotal = Math.max(state.artifacts.length, state.artifactsTotal + addedCount);
         renderArtifacts();
         refreshTimelineAfterArtifacts();
         toast(`发现 ${incoming.length} 个产出物`);
@@ -1612,11 +2230,19 @@ $('#pairForm').addEventListener('submit', async (event) => {
   try {
     await post('/api/auth/pair', { code: $('#pairCode').value });
     $('#pairCode').value = '';
+    showStartup('正在初始化工作现场…');
+    const { threadsPromise, favoritesPromise } = await loadBootstrap();
+    void loadRuntimeCatalogs();
+    await Promise.all([
+      threadsPromise.catch((error) => toast(error.message, 'error')),
+      favoritesPromise.catch((error) => toast(error.message, 'error')),
+      restoreUiState().catch((error) => toast(error.message, 'error')),
+    ]);
     showApp();
-    await loadBootstrap();
-    await restoreUiState().catch((error) => toast(error.message, 'error'));
     connectEvents();
+    tryAutoFullscreen();
   } catch (error) {
+    showLogin();
     $('#pairError').textContent = error.message;
   }
 });
@@ -1683,14 +2309,28 @@ $('#loadOlderButton').addEventListener('click', () => loadOlderTurns().catch((er
 initChatScroll();
 initKeyboardInsets();
 initDingtalk(showTab);
+initFileShare();
+initSkillMarket({
+  refreshInstalled: async () => {
+    skillsCache = null;
+    try {
+      const result = await api('/api/skills');
+      skillsCache = result.data ?? [];
+    } catch (error) {
+      skillsCache = [];
+      toast(error.message, 'error');
+    }
+    renderSkills(skillsCache);
+  },
+});
 let artifactSearchTimer = null;
 $('#artifactSearch').addEventListener('input', (event) => {
   clearTimeout(artifactSearchTimer);
+  state.artifactQuery = event.target.value;
+  state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
   artifactSearchTimer = setTimeout(() => {
-    state.artifactQuery = event.target.value;
-    state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
-    renderArtifacts();
-  }, 120);
+    loadArtifactSearch(state.artifactQuery).catch((error) => toast(error.message, 'error'));
+  }, 180);
 });
 $('#artifactList').addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
@@ -1700,15 +2340,28 @@ $('#artifactList').addEventListener('click', (event) => {
     renderArtifacts();
     return;
   }
-  const artifact = state.artifacts.find((item) => item.id === button.dataset.artifactId);
-  if (!artifact) return;
-  if (button.dataset.action === 'send-dingtalk' && artifact.available) {
+  if (button.dataset.action === 'load-more') {
     button.disabled = true;
-    sendArtifactToDingtalk(artifact).finally(() => { button.disabled = false; });
+    const action = state.artifactQuery.trim()
+      ? loadArtifactSearch(state.artifactQuery, { append: true })
+      : loadArtifacts(state.currentThread?.id, { append: true });
+    action.catch((error) => toast(error.message, 'error'));
+    return;
   }
+  const artifact = [...(state.artifactSearchResults ?? []), ...state.artifacts]
+    .find((item) => item.id === button.dataset.artifactId);
+  if (!artifact) return;
+  if (button.dataset.action === 'share' && artifact.available) openFileShare(artifact);
   else if (button.dataset.action === 'preview' && artifact.available) openArtifact(artifact);
 });
 $('#timeline').addEventListener('click', (event) => {
+  const link = event.target.closest('.agent-card a');
+  const href = link?.getAttribute('href');
+  if (link && isLocalArtifactHref(href)) {
+    event.preventDefault();
+    openLinkedArtifact(href).catch((error) => toast(error.message, 'error'));
+    return;
+  }
   const chip = event.target.closest('.turn-artifact-chip');
   if (chip) {
     const artifact = state.artifacts.find((item) => item.id === chip.dataset.artifactId);
@@ -1718,7 +2371,45 @@ $('#timeline').addEventListener('click', (event) => {
   if (event.target.closest('.turn-artifacts-more')) showTab('artifacts');
 });
 $('#projectUpButton').addEventListener('click', () => browseProjects(state.projectBrowser.parent).catch((error) => toast(error.message, 'error')));
+$('#desktopUploadProjectFilesButton').addEventListener('click', () => openProjectFilePicker(state.projectBrowser?.current?.path));
+$('#uploadProjectFilesButton').addEventListener('click', () => {
+  const directory = fileActionTarget?.path ?? state.projectBrowser?.current?.path;
+  hideFileUploadPopover();
+  openProjectFilePicker(directory);
+});
+$('#createProjectFileButton').addEventListener('click', () => openProjectCreateDialog('file', fileActionTarget?.path));
+$('#createProjectDirectoryButton').addEventListener('click', () => openProjectCreateDialog('directory', fileActionTarget?.path));
+$('#deleteProjectEntryButton').addEventListener('click', () => openProjectDeleteDialog(fileActionTarget));
+$('#projectFileInput').addEventListener('change', (event) => {
+  const files = [...event.target.files];
+  const directory = pendingProjectUploadDirectory;
+  pendingProjectUploadDirectory = null;
+  event.target.value = '';
+  uploadProjectFiles(files, directory).catch((error) => toast(error.message, 'error'));
+});
+const fileDirectoryButton = $('#fileDirectoryButton');
+bindLongPress(fileDirectoryButton, showCurrentDirectoryActions);
+document.addEventListener('pointerdown', (event) => {
+  if ($('#fileUploadPopover').hidden) return;
+  if (event.target.closest('#fileUploadPopover, [aria-expanded="true"]')) return;
+  hideFileUploadPopover();
+});
+$('#closeProjectCreateButton').addEventListener('click', closeProjectCreateDialog);
+$('#cancelProjectCreateButton').addEventListener('click', closeProjectCreateDialog);
+$('#confirmProjectCreateButton').addEventListener('click', confirmProjectCreate);
+$('#projectCreateDialog').addEventListener('close', () => { projectCreateDirectory = null; });
+$('#projectCreateName').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.isComposing) {
+    event.preventDefault();
+    confirmProjectCreate();
+  }
+});
+$('#closeProjectDeleteButton').addEventListener('click', closeProjectDeleteDialog);
+$('#cancelProjectDeleteButton').addEventListener('click', closeProjectDeleteDialog);
+$('#confirmProjectDeleteButton').addEventListener('click', confirmProjectDelete);
+$('#projectDeleteDialog').addEventListener('close', () => { projectDeleteTarget = null; });
 $('#closePreviewButton').addEventListener('click', () => $('#previewDialog').close());
+$('#sharePreviewButton').addEventListener('click', () => openFileShare(state.currentArtifact));
 $('#modifyArtifactButton').addEventListener('click', modifyCurrentArtifact);
 $$('.bottom-nav button').forEach((button) => button.addEventListener('click', () => {
   if (button.dataset.tab) showTab(button.dataset.tab);

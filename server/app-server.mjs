@@ -215,6 +215,16 @@ export class AppServerBridge extends EventEmitter {
 
 export function approvalResponse(method, params, body) {
   const action = body?.action;
+  if (method === 'mcpServer/elicitation/request') {
+    const normalizedAction = action === 'acceptForSession' ? 'accept' : action;
+    const actions = new Set(['accept', 'decline', 'cancel']);
+    if (!actions.has(normalizedAction)) throw new Error('MCP 请求确认决定无效。');
+    return {
+      action: normalizedAction,
+      content: normalizedAction === 'accept' ? (body?.content ?? null) : null,
+      _meta: body?._meta ?? null,
+    };
+  }
   if (method === 'item/commandExecution/requestApproval'
       || method === 'item/fileChange/requestApproval') {
     const decisions = new Set(['accept', 'acceptForSession', 'decline', 'cancel']);

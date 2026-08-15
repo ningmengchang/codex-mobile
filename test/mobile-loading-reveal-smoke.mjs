@@ -59,6 +59,20 @@ try {
       },
     };
     window.__boot = boot;
+    window.__appRevealSnapshots = [];
+    window.addEventListener('DOMContentLoaded', () => {
+      const app = document.querySelector('#app');
+      const capture = () => {
+        if (app.hidden) return;
+        window.__appRevealSnapshots.push({
+          latestVisible: document.querySelector('#timeline')?.textContent?.includes('问题21') ?? false,
+          threadLoadingHidden: document.querySelector('#threadLoading')?.hidden ?? false,
+          inputEnabled: !document.querySelector('#promptInput')?.readOnly && !document.querySelector('#sendButton')?.disabled,
+        });
+      };
+      new MutationObserver(capture).observe(app, { attributes: true, attributeFilter: ['hidden'] });
+      capture();
+    });
   }, bootstrap);
   const page = await context.newPage();
   await page.route('**/*', async (route) => {
@@ -183,9 +197,43 @@ try {
   await openAndAssertLoading();
 
   // 刷新后同样先加载后展示，且最终停在最新
+  const beforeReloadReads = threadReadCount;
   await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('#startupScreen').waitFor({ state: 'visible', timeout: 2_000 });
+  await page.waitForTimeout(120);
+  const gated = await page.evaluate(() => ({
+    appHidden: document.querySelector('#app').hidden,
+    startupVisible: !document.querySelector('#startupScreen').hidden,
+    composerVisible: getComputedStyle(document.querySelector('#composer')).display !== 'none'
+      && !document.querySelector('#app').hidden,
+  }));
+  if (!gated.appHidden || !gated.startupVisible || gated.composerVisible) {
+    throw new Error(`刷新恢复期间泄露了未完成页面：${JSON.stringify(gated)}`);
+  }
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await openAndAssertLoading();
+  if (threadReadCount <= beforeReloadReads) throw new Error('刷新后未恢复保存的会话');
+  const reloadResult = await page.evaluate(() => {
+    const chat = document.querySelector('#chatView');
+    return {
+      startupHidden: document.querySelector('#startupScreen').hidden,
+      threadLoadingHidden: document.querySelector('#threadLoading').hidden,
+      inputEnabled: !document.querySelector('#promptInput').readOnly && !document.querySelector('#sendButton').disabled,
+      composerDisplay: getComputedStyle(document.querySelector('#composer')).display,
+      latestVisible: document.querySelector('#timeline').textContent.includes('问题21'),
+      atBottom: chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 60,
+      revealSnapshots: window.__appRevealSnapshots,
+    };
+  });
+  if (!reloadResult.startupHidden || !reloadResult.threadLoadingHidden || !reloadResult.inputEnabled
+    || reloadResult.composerDisplay === 'none' || !reloadResult.latestVisible || !reloadResult.atBottom) {
+    throw new Error(`刷新完成后的会话状态错误：${JSON.stringify(reloadResult)}`);
+  }
+  if (reloadResult.revealSnapshots.length !== 1
+    || !reloadResult.revealSnapshots[0].latestVisible
+    || !reloadResult.revealSnapshots[0].threadLoadingHidden
+    || !reloadResult.revealSnapshots[0].inputEnabled) {
+    throw new Error(`应用在会话就绪前被提前展示：${JSON.stringify(reloadResult.revealSnapshots)}`);
+  }
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-loading-reveal.png', fullPage: true });
   process.stdout.write(JSON.stringify({ firstLoadOk: true, reloadOk: true }));

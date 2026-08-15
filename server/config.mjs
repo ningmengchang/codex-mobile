@@ -68,7 +68,7 @@ export function loadConfig(overrides = {}) {
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_BODY_BYTES, 2 * 1024 * 1024),
     defaultModel: overrides.defaultModel
       ?? process.env.CODEX_MOBILE_DEFAULT_MODEL
-      ?? 'deepseek-v4-flash',
+      ?? 'gpt-5.6-sol',
     defaultEffort: overrides.defaultEffort
       ?? process.env.CODEX_MOBILE_DEFAULT_EFFORT
       ?? 'max',

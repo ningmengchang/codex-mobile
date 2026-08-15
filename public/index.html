@@ -7,10 +7,15 @@
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=53">
+  <link rel="stylesheet" href="/styles.css?v=65">
   <title>Codex 随行</title>
 </head>
 <body>
+  <section id="startupScreen" class="startup-screen" role="status" aria-live="polite">
+    <span class="startup-spinner" aria-hidden="true"></span>
+    <p>正在恢复工作现场…</p>
+  </section>
+
   <section id="loginScreen" class="login-screen" hidden>
     <div class="login-card">
       <div class="mark" aria-hidden="true"><span>C</span></div>
@@ -56,7 +61,10 @@
         </section>
         <button id="jumpQuestionButton" class="scroll-question" hidden>上一问题 ↑</button>
         <button id="scrollLatestButton" class="scroll-latest" hidden>回到最新 ↓</button>
-        <button id="fullscreenButton" class="fullscreen-float" type="button" aria-label="全屏" title="全屏" aria-pressed="false"><i>⛶</i></button>
+        <button id="fullscreenButton" class="fullscreen-float" type="button" aria-label="全屏" title="全屏" aria-pressed="false">
+          <svg id="fullscreenIconEnter" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V3h4M13 7V3H9M3 9v4h4M13 9v4H9"/></svg>
+          <svg id="fullscreenIconExit" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M7 3v4H3M9 3v4h4M7 13V9H3M9 13V9h4"/></svg>
+        </button>
         <form id="composer" class="composer">
           <div id="mentionTray" class="mention-tray"></div>
           <textarea id="promptInput" rows="1" enterkeyhint="send" autocapitalize="sentences" placeholder="告诉 Codex 下一步做什么…"></textarea>
@@ -95,7 +103,8 @@
       </section>
 
       <section id="projectsView" class="view" data-view="projects">
-        <div class="section-head"><div><p class="eyebrow">WORKSPACES</p><h2>选择项目</h2></div></div>
+        <div class="section-head"><div><p class="eyebrow">WORKSPACES</p><h2>项目与文件</h2></div><button id="desktopUploadProjectFilesButton" class="file-upload-button" type="button">↑ 上传</button></div>
+        <input id="projectFileInput" type="file" multiple hidden>
         <button id="projectUpButton" class="path-button" hidden>← 返回上一级</button>
         <p id="projectPath" class="project-path"></p>
         <div id="projectList" class="project-list"></div>
@@ -112,9 +121,18 @@
       <button data-tab="favorites"><span>☆</span><small>收藏</small></button>
       <button data-tab="chat" class="active nav-primary"><span>◒</span><small>控制</small></button>
       <button data-tab="artifacts"><span>◇</span><small>产出物</small><i id="artifactBadge" hidden></i></button>
-      <button data-tab="projects"><span>⌁</span><small>项目</small></button>
+      <button id="fileDirectoryButton" data-tab="projects" aria-label="文件目录，长按可上传文件" aria-haspopup="menu" aria-expanded="false"><span>⌁</span><small>文件目录</small></button>
       <button id="settingsButton" class="nav-settings" aria-label="设置" title="设置"><span>⚙</span><small>设置</small></button>
     </nav>
+    <div id="fileUploadPopover" class="file-upload-popover" data-anchor="nav" role="menu" hidden>
+      <strong id="fileActionTargetName" class="file-action-target">当前目录</strong>
+      <div class="file-action-buttons">
+        <button id="uploadProjectFilesButton" class="file-upload-button" type="button" role="menuitem">↑ 上传</button>
+        <button id="createProjectFileButton" class="file-action-button" type="button" role="menuitem">＋ 文件</button>
+        <button id="createProjectDirectoryButton" class="file-action-button" type="button" role="menuitem">＋ 文件夹</button>
+        <button id="deleteProjectEntryButton" class="file-action-button danger" type="button" role="menuitem" hidden>删除</button>
+      </div>
+    </div>
   </div>
 
   <dialog id="settingsSheet" class="settings-dialog">
@@ -135,7 +153,33 @@
 
   <dialog id="skillSheet" class="settings-dialog">
     <header><strong>技能</strong><button id="closeSkillButton" class="icon-button" aria-label="关闭技能">×</button></header>
+    <div id="skillTabs" class="skill-tabs">
+      <button type="button" data-skill-tab="installed" class="active">已安装</button>
+      <button type="button" data-skill-tab="discover">发现</button>
+      <button type="button" data-skill-tab="official">官方</button>
+    </div>
     <div id="skillList" class="skill-list"></div>
+    <div id="skillMarketSearch" class="skill-market-search" hidden>
+      <input id="skillMarketSearchInput" type="search" placeholder="搜索热门技能" autocomplete="off" enterkeyhint="search">
+    </div>
+    <div id="skillDiscoverList" class="skill-list" hidden></div>
+    <div id="skillOfficialList" class="skill-list" hidden></div>
+  </dialog>
+
+  <dialog id="skillInstallDialog" class="settings-dialog">
+    <header><strong>安装技能</strong><button id="closeSkillInstallButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body">
+      <p id="skillInstallName" class="settings-runtime"></p>
+      <p id="skillInstallRepo" class="skill-install-meta"></p>
+      <p id="skillInstallDescription" class="settings-runtime"></p>
+      <div id="skillPathPicker" class="skill-path-picker" hidden>
+        <label><span>技能路径</span><select id="skillInstallPathSelect"></select></label>
+      </div>
+      <div class="thread-confirm-actions">
+        <button id="cancelSkillInstallButton" type="button">取消</button>
+        <button id="confirmSkillInstallButton" type="button" class="button primary">确认安装</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="threadActionDialog" class="settings-dialog">
@@ -176,13 +220,51 @@
     </div>
   </dialog>
 
+  <dialog id="projectCreateDialog" class="settings-dialog">
+    <header><strong id="projectCreateTitle">新建文件</strong><button id="closeProjectCreateButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body project-entry-form">
+      <p id="projectCreatePath" class="file-dialog-path"></p>
+      <label><span>名称</span><input id="projectCreateName" type="text" maxlength="255" autocomplete="off" placeholder="输入名称"></label>
+      <label id="projectCreateContentField"><span>初始内容（可选）</span><textarea id="projectCreateContent" rows="5" maxlength="1000000" placeholder="可留空，后续再编辑"></textarea></label>
+      <div class="thread-confirm-actions">
+        <button id="cancelProjectCreateButton" type="button">取消</button>
+        <button id="confirmProjectCreateButton" type="button" class="button primary">创建</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="projectDeleteDialog" class="settings-dialog">
+    <header><strong>确认删除</strong><button id="closeProjectDeleteButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body">
+      <p id="projectDeleteMessage" class="file-delete-message"></p>
+      <p class="file-delete-warning">删除后无法恢复。</p>
+      <div class="thread-confirm-actions">
+        <button id="cancelProjectDeleteButton" type="button">取消</button>
+        <button id="confirmProjectDeleteButton" type="button" class="button danger">确认删除</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="previewDialog" class="preview-dialog">
-    <header><div><small id="previewKind"></small><strong id="previewTitle"></strong></div><button id="closePreviewButton" class="icon-button" aria-label="关闭">×</button></header>
+    <header><div><small id="previewKind"></small><strong id="previewTitle"></strong></div><div class="preview-header-actions"><button id="sharePreviewButton" class="preview-share-button" type="button" aria-label="分享当前文件" hidden>分享</button><button id="closePreviewButton" class="icon-button" aria-label="关闭">×</button></div></header>
     <div id="previewBody" class="preview-body"></div>
     <footer><button id="modifyArtifactButton" class="button">让 Codex 修改</button><a id="downloadArtifactButton" class="button primary" download>下载</a></footer>
   </dialog>
 
+  <dialog id="fileShareDialog" class="file-share-dialog" aria-labelledby="fileShareName">
+    <header><div><small>分享文件</small><strong id="fileShareName"></strong></div><button id="closeFileShareButton" class="icon-button" type="button" aria-label="关闭分享">×</button></header>
+    <div class="file-share-body">
+      <p id="fileShareMeta" class="file-share-meta"></p>
+      <p id="fileShareStatus" class="file-share-status" role="status" aria-live="polite"></p>
+      <button id="systemShareButton" class="file-share-primary" type="button" disabled>准备文件…</button>
+      <div class="file-share-secondary">
+        <button id="shareDingtalkButton" type="button">钉钉发给自己</button>
+        <a id="shareDownloadButton" download>下载</a>
+      </div>
+    </div>
+  </dialog>
+
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=81"></script>
 </body>
 </html>

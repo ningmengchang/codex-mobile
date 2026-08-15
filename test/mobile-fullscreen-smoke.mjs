@@ -90,6 +90,24 @@ try {
   if (position.popoverGone !== true) throw new Error(`弹层未移除：${JSON.stringify(position)}`);
   if (position.buttonRight > position.viewportWidth) throw new Error(`按钮超出右边界：${JSON.stringify(position)}`);
   if (position.buttonTop >= position.jumpTop) throw new Error(`按钮未在“上一问题”上方：${JSON.stringify(position)}`);
+  const iconCenter = await page.evaluate(() => {
+    const button = document.querySelector('#fullscreenButton').getBoundingClientRect();
+    const icon = document.querySelector('#fullscreenButton svg:not([hidden])').getBoundingClientRect();
+    return {
+      buttonCenterX: button.left + button.width / 2,
+      buttonCenterY: button.top + button.height / 2,
+      iconCenterX: icon.left + icon.width / 2,
+      iconCenterY: icon.top + icon.height / 2,
+      enterHidden: document.querySelector('#fullscreenIconEnter').hasAttribute('hidden'),
+      exitHidden: document.querySelector('#fullscreenIconExit').hasAttribute('hidden'),
+    };
+  });
+  if (Math.abs(iconCenter.buttonCenterX - iconCenter.iconCenterX) > 1 || Math.abs(iconCenter.buttonCenterY - iconCenter.iconCenterY) > 1) {
+    throw new Error(`图标未居中：${JSON.stringify(iconCenter)}`);
+  }
+  if (iconCenter.enterHidden === iconCenter.exitHidden) {
+    throw new Error(`初始应只有一个图标可见：${JSON.stringify(iconCenter)}`);
+  }
 
   // 2) 首次任意点按（浏览器限制下）自动进入全屏
   await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 1 })));
@@ -98,12 +116,20 @@ try {
   if ((!enteredByFallback.fullscreen && !enteredByFallback.bodyClass) || enteredByFallback.pressed !== 'true') {
     throw new Error(`首次点按未进入全屏：${JSON.stringify(enteredByFallback)}`);
   }
+  const exitVisible = await page.evaluate(() => (
+    !document.querySelector('#fullscreenIconExit').hasAttribute('hidden') && document.querySelector('#fullscreenIconEnter').hasAttribute('hidden')
+  ));
+  if (!exitVisible) throw new Error('进入全屏后退出图标未显示');
 
   // 3) 点按钮退出全屏
   await page.locator('#fullscreenButton').click();
   await page.waitForTimeout(300);
   const exited = await activeState();
   if (exited.fullscreen || exited.bodyClass || exited.pressed !== 'false') throw new Error(`未退出全屏：${JSON.stringify(exited)}`);
+  const enterVisible = await page.evaluate(() => (
+    !document.querySelector('#fullscreenIconEnter').hasAttribute('hidden') && document.querySelector('#fullscreenIconExit').hasAttribute('hidden')
+  ));
+  if (!enterVisible) throw new Error('退出全屏后进入图标未显示');
 
   // 4) 再点按钮重新进入，且不会“刚进就退”
   await page.locator('#fullscreenButton').click();

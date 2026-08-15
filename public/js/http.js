@@ -17,6 +17,7 @@ export async function api(url, options = {}) {
     const error = new Error(body?.message || `请求失败（${response.status}）`);
     error.status = response.status;
     error.code = body?.error;
+    error.data = body?.data;
     throw error;
   }
   return body;
@@ -31,8 +32,10 @@ export function post(url, body = {}) {
 
 function showLogin() {
   state.events?.close?.();
+  const startup = document.querySelector('#startupScreen');
   const login = document.querySelector('#loginScreen');
   const app = document.querySelector('#app');
+  if (startup) startup.hidden = true;
   if (login) login.hidden = false;
   if (app) app.hidden = true;
 }

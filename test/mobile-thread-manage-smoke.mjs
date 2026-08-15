@@ -40,14 +40,25 @@ try {
   }, bootstrap);
   const page = await context.newPage();
   let deleted = false;
+  let favorites = [];
   await page.route('**/*', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const fulfillJson = (body, status = 200) => route.fulfill({
       status, contentType: 'application/json; charset=utf-8', body: JSON.stringify(body),
     });
     if (pathname === '/api/auth/status') return fulfillJson({ authenticated: true });
-    if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
+    if (pathname === '/api/bootstrap') return fulfillJson({ ...bootstrap, favorites });
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
+    if (pathname === '/api/favorites' && route.request().method() === 'POST') {
+      const item = route.request().postDataJSON();
+      favorites = [item, ...favorites.filter((entry) => entry.id !== item.id)];
+      return fulfillJson({ data: favorites });
+    }
+    if (pathname.startsWith('/api/favorites/') && route.request().method() === 'DELETE') {
+      const threadId = decodeURIComponent(pathname.slice('/api/favorites/'.length));
+      favorites = favorites.filter((item) => item.id !== threadId);
+      return fulfillJson({ data: favorites });
+    }
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
     if (pathname === '/api/threads' && route.request().method() === 'GET') {
       return fulfillJson({ data: deleted ? [] : [threadA] });
@@ -83,6 +94,7 @@ try {
   await page.locator('.agent-card', { hasText: '会话A内容' }).waitFor({ timeout: 10_000 });
   await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-star').click();
+  await page.locator('#mobileThreadList .thread-star.on').waitFor({ timeout: 5_000 });
 
   // 重命名（先非法名称，再合法）
   await page.locator('#mobileThreadList .thread-more').click();

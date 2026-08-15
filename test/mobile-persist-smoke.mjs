@@ -20,10 +20,10 @@ const bootstrap = {
   appServer: { ready: true },
   runtime: { user: 'ningmengchang' },
   models: [
-    { id: 'deepseek-v4-flash', displayName: 'DeepSeek-V4-Flash' },
-    { id: 'deepseek-v4-pro', displayName: 'DeepSeek-V4-Pro' },
+    { id: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol' },
+    { id: 'gpt-5.6-terra', displayName: 'GPT-5.6-Terra' },
   ],
-  defaultModel: 'deepseek-v4-flash',
+  defaultModel: 'gpt-5.6-sol',
   defaultEffort: 'max',
   collaborationModes: [],
   pendingRequests: [],
@@ -36,6 +36,13 @@ try {
     viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
   });
   await context.addInitScript((boot) => {
+    try {
+      const marker = 'codex-mobile-test-stale-model-seeded';
+      if (!sessionStorage.getItem(marker)) {
+        localStorage.setItem('codex-mobile-model', 'deepseek-v4-flash');
+        sessionStorage.setItem(marker, '1');
+      }
+    } catch {}
     const listeners = new Map();
     class FakeEventSource {
       constructor() {
@@ -78,15 +85,18 @@ try {
 
   await page.goto('http://127.0.0.1:39878/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  if (await page.locator('#modelSelect').inputValue() !== 'deepseek-v4-flash') {
-    throw new Error('首次加载未默认选中 deepseek-v4-flash');
+  if (await page.locator('#modelSelect').inputValue() !== 'gpt-5.6-sol') {
+    throw new Error('首次加载未默认选中 gpt-5.6-sol');
+  }
+  if (await page.evaluate(() => localStorage.getItem('codex-mobile-model')) !== null) {
+    throw new Error('无效的历史 DeepSeek 模型选择未被清理');
   }
   if (await page.locator('#effortSelect').inputValue() !== 'max') {
     throw new Error('首次加载未默认选中 Max');
   }
   await page.locator('#settingsButton').click();
   await page.locator('#settingsSheet[open]').waitFor({ timeout: 5_000 });
-  await page.locator('#modelSelect').selectOption('deepseek-v4-pro');
+  await page.locator('#modelSelect').selectOption('gpt-5.6-terra');
   await page.locator('#effortSelect').selectOption('high');
   await page.locator('#closeSettingsButton').click();
   await page.waitForFunction(() => !document.querySelector('#settingsSheet')?.hasAttribute('open'));
@@ -103,8 +113,8 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
-  if (await page.locator('#modelSelect').inputValue() !== 'deepseek-v4-pro') {
-    throw new Error('刷新后模型选择未保持 deepseek-v4-pro');
+  if (await page.locator('#modelSelect').inputValue() !== 'gpt-5.6-terra') {
+    throw new Error('刷新后模型选择未保持 gpt-5.6-terra');
   }
   if (await page.locator('#effortSelect').inputValue() !== 'high') {
     throw new Error('刷新后推理强度未保持 high');
@@ -124,8 +134,8 @@ try {
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message').first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(1200);
-  if (await page.locator('#modelSelect').inputValue() !== 'deepseek-v4-pro') {
-    throw new Error('第二次刷新后模型选择未保持 deepseek-v4-pro');
+  if (await page.locator('#modelSelect').inputValue() !== 'gpt-5.6-terra') {
+    throw new Error('第二次刷新后模型选择未保持 gpt-5.6-terra');
   }
   if (await page.locator('#effortSelect').inputValue() !== 'high') {
     throw new Error('第二次刷新后推理强度未保持 high');
@@ -150,8 +160,8 @@ try {
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  if (await page.locator('#modelSelect').inputValue() !== 'deepseek-v4-flash') {
-    throw new Error('清空本地存储后未回到默认 deepseek-v4-flash');
+  if (await page.locator('#modelSelect').inputValue() !== 'gpt-5.6-sol') {
+    throw new Error('清空本地存储后未回到默认 gpt-5.6-sol');
   }
   if (await page.locator('#effortSelect').inputValue() !== 'max') {
     throw new Error('清空本地存储后未回到默认 Max');

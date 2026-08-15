@@ -15,7 +15,7 @@ const thread = {
 const historyTurn = {
   id: 'turn-1', status: 'completed', durationMs: 1000, items: [
     { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: '生成菜单管理 PRD' }] },
-    { id: 'agent-1', type: 'agentMessage', text: '已完成 PRD 生成。' },
+    { id: 'agent-1', type: 'agentMessage', text: '已完成 PRD 生成。[打开最终目录](/home/ningmengchang/最终材料)' },
   ],
 };
 const bootstrap = {
@@ -70,6 +70,17 @@ const artifacts = [
     path: '/home/ningmengchang/docs/old-report.md',
   }),
 ];
+const linkedDirectory = artifact({
+  id: 'linked-dir', token: 'tok-dir', name: '最终材料', relativePath: '最终材料',
+  fileKind: 'directory', isDirectory: true, size: 4096,
+  path: '/home/ningmengchang/最终材料',
+});
+const linkedReport = artifact({
+  id: 'linked-report', token: 'tok-linked-report', name: '最终报告.md', relativePath: '最终材料/最终报告.md',
+  fileKind: 'markdown', isDirectory: false, size: 120,
+  path: '/home/ningmengchang/最终材料/最终报告.md',
+});
+const previewArtifacts = [...artifacts, linkedDirectory, linkedReport];
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -95,6 +106,18 @@ try {
         for (const callback of listeners.get(type) ?? []) callback(event);
       },
     };
+    window.__sharedFiles = [];
+    Object.defineProperty(navigator, 'canShare', {
+      configurable: true,
+      value: (data) => Array.isArray(data?.files) && data.files.length === 1,
+    });
+    Object.defineProperty(navigator, 'share', {
+      configurable: true,
+      value: async (data) => {
+        const file = data.files[0];
+        window.__sharedFiles.push({ name: file.name, type: file.type, size: file.size, text: await file.text() });
+      },
+    });
     window.__boot = boot;
   }, bootstrap);
   const page = await context.newPage();
@@ -115,18 +138,42 @@ try {
     if (pathname === '/api/threads/thread-1/resume') {
       return fulfillJson({ thread: { ...thread, turns: [historyTurn] } });
     }
-    if (pathname === '/api/threads/thread-1/artifacts') return fulfillJson({ data: artifacts });
+    if (pathname === '/api/threads/thread-1/artifacts') {
+      const search = (url.searchParams.get('search') ?? '').trim().toLowerCase();
+      const offset = Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100;
+      const filtered = search
+        ? artifacts.filter((item) => `${item.name} ${item.relativePath}`.toLowerCase().includes(search))
+        : artifacts;
+      return fulfillJson({
+        data: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        nextOffset: offset + limit < filtered.length ? offset + limit : null,
+      });
+    }
+    if (pathname === '/api/files/resolve' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return decodeURIComponent(body.path) === '/home/ningmengchang/最终材料'
+        ? fulfillJson({ artifact: linkedDirectory })
+        : fulfillJson({ error: 'NOT_FOUND', message: '文件不存在' }, 404);
+    }
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const meta = pathname.match(/^\/api\/artifacts\/([^/]+)\/meta$/);
     if (meta) {
-      const item = artifacts.find((entry) => entry.token === meta[1]);
+      const item = previewArtifacts.find((entry) => entry.token === meta[1]);
       return fulfillJson(item ? {
-        name: item.name, relativePath: item.relativePath, fileKind: item.fileKind, size: item.size, isDirectory: false,
+        name: item.name, relativePath: item.relativePath, fileKind: item.fileKind, size: item.size, isDirectory: Boolean(item.isDirectory),
       } : { error: 'NOT_FOUND', message: '文件不存在' }, item ? 200 : 404);
+    }
+    const directory = pathname.match(/^\/api\/artifacts\/([^/]+)\/directory$/);
+    if (directory) {
+      return directory[1] === linkedDirectory.token
+        ? fulfillJson({ data: [linkedReport], parent: null, truncated: false })
+        : fulfillJson({ error: 'NOT_A_DIRECTORY', message: '该路径不是目录' }, 400);
     }
     const raw = pathname.match(/^\/api\/artifacts\/([^/]+)\/raw$/);
     if (raw) {
-      const item = artifacts.find((entry) => entry.token === raw[1]);
+      const item = previewArtifacts.find((entry) => entry.token === raw[1]);
       if (!item) return fulfillJson({ error: 'NOT_FOUND', message: '文件不存在' }, 404);
       return route.fulfill({
         status: 200,
@@ -153,6 +200,19 @@ try {
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message.user .bubble').waitFor({ timeout: 10_000 });
+
+  // 0) 聊天回复中的本机目录链接应在应用内打开，并可继续预览目录内文件
+  const linkedPath = page.locator('.message .agent-card a', { hasText: '打开最终目录' });
+  await linkedPath.click();
+  await page.locator('#previewDialog[open]').waitFor({ timeout: 10_000 });
+  await page.waitForFunction(() => document.querySelector('#previewTitle')?.textContent === '最终材料');
+  await page.locator('.directory-entry', { hasText: '最终报告.md' }).waitFor({ timeout: 10_000 });
+  if (!(await page.locator('#downloadArtifactButton').isHidden())) throw new Error('目录预览不应显示下载按钮');
+  await page.locator('.directory-entry', { hasText: '最终报告.md' }).click();
+  await page.waitForFunction(() => document.querySelector('#previewTitle')?.textContent === '最终报告.md');
+  await page.waitForFunction(() => document.querySelector('#previewBody')?.textContent?.includes('内容预览'));
+  if (await page.locator('#downloadArtifactButton').isHidden()) throw new Error('文件预览应恢复下载按钮');
+  await page.locator('#closePreviewButton').click();
 
   // 1) 聊天窗口出现“本次产出”条，且只展示文档类产出
   await page.locator('.turn-artifacts').waitFor({ timeout: 10_000 });
@@ -187,8 +247,21 @@ try {
   if (!timeTexts.length || timeTexts.every((text) => !text.trim())) {
     throw new Error(`产出物卡片缺少修改时间：${timeTexts.join(',')}`);
   }
+  const firstShareButton = page.locator('.artifact-card button[data-action="share"]').first();
+  await firstShareButton.click();
+  await page.locator('#fileShareDialog[open]').waitFor();
+  await page.locator('#systemShareButton:not(:disabled)').waitFor();
+  await page.locator('#systemShareButton').click();
+  await page.locator('#fileShareDialog').waitFor({ state: 'hidden' });
+  const sharedArtifact = await page.evaluate(() => window.__sharedFiles[0]);
+  if (!sharedArtifact?.name || !sharedArtifact.text.includes('内容预览')) {
+    throw new Error(`产出物系统分享内容错误：${JSON.stringify(sharedArtifact)}`);
+  }
+
+  await firstShareButton.click();
+  await page.locator('#fileShareDialog[open]').waitFor();
   page.once('dialog', (dialog) => dialog.accept());
-  await page.locator('.artifact-card button[data-action="send-dingtalk"]').first().click();
+  await page.locator('#shareDingtalkButton').click();
   await page.waitForFunction(() => document.querySelector('#toastRegion')?.textContent?.includes('已发送'), null, { timeout: 10_000 });
 
   // 4) 搜索过滤与空态

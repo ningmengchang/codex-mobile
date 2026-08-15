@@ -32,6 +32,21 @@ test('bridge initializes, correlates responses, and resolves server requests', a
 });
 
 test('approval response validates modern, permission, question, and legacy requests', () => {
+  assert.deepEqual(approvalResponse('mcpServer/elicitation/request', {
+    mode: 'url', url: 'https://example.test/confirm',
+  }, { action: 'accept' }), {
+    action: 'accept', content: null, _meta: null,
+  });
+  assert.deepEqual(approvalResponse('mcpServer/elicitation/request', {
+    mode: 'form', requestedSchema: { type: 'object', properties: {} },
+  }, { action: 'decline', content: { ignored: true } }), {
+    action: 'decline', content: null, _meta: null,
+  });
+  assert.deepEqual(approvalResponse('mcpServer/elicitation/request', {}, {
+    action: 'acceptForSession', content: { confirmed: true }, _meta: { source: 'mobile' },
+  }), {
+    action: 'accept', content: { confirmed: true }, _meta: { source: 'mobile' },
+  });
   assert.deepEqual(approvalResponse('item/fileChange/requestApproval', {}, { action: 'accept' }), { decision: 'accept' });
   assert.deepEqual(approvalResponse('item/permissions/requestApproval', {
     permissions: { network: { enabled: true }, fileSystem: null },

@@ -86,18 +86,27 @@ try {
     const composer = document.querySelector('#composer').getBoundingClientRect();
     const nav = document.querySelector('.bottom-nav');
     const fullscreen = document.querySelector('#fullscreenButton');
+    const scrollQuestion = document.querySelector('#jumpQuestionButton');
+    const scrollLatest = document.querySelector('#scrollLatestButton');
     return {
       keyboardOpen: document.body.classList.contains('keyboard-open'),
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
       composerBottom: Math.round(composer.bottom),
       navDisplay: getComputedStyle(nav).display,
       fullscreenDisplay: getComputedStyle(fullscreen).display,
+      fullscreenBottom: Math.round(parseFloat(getComputedStyle(fullscreen).bottom)),
+      scrollQuestionBottom: Math.round(parseFloat(getComputedStyle(scrollQuestion).bottom)),
+      scrollLatestBottom: Math.round(parseFloat(getComputedStyle(scrollLatest).bottom)),
     };
   });
   if (!opened.keyboardOpen || opened.kbInset !== '300px') throw new Error(`键盘态未生效：${JSON.stringify(opened)}`);
   if (opened.composerBottom > 548 || opened.composerBottom < 540) throw new Error(`输入框未抬到键盘上方：${JSON.stringify(opened)}`);
   if (opened.navDisplay !== 'none') throw new Error(`键盘打开时底部导航未隐藏：${JSON.stringify(opened)}`);
-  if (opened.fullscreenDisplay !== 'none') throw new Error(`键盘打开时全屏按钮未隐藏：${JSON.stringify(opened)}`);
+  if (opened.fullscreenDisplay === 'none') throw new Error(`键盘打开时全屏按钮不应隐藏：${JSON.stringify(opened)}`);
+  if (opened.fullscreenBottom <= opened.scrollQuestionBottom) throw new Error(`全屏按钮未保持在上一个问题上方：${JSON.stringify(opened)}`);
+  if (Math.abs(opened.fullscreenBottom - 524) > 2 || Math.abs(opened.scrollQuestionBottom - 490) > 2) {
+    throw new Error(`键盘打开时悬浮按钮未随键盘上移：${JSON.stringify(opened)}`);
+  }
 
   await page.evaluate(() => document.activeElement?.blur());
   await page.evaluate(() => window.__keyboard.setHeight(844));
@@ -110,10 +119,15 @@ try {
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
       composerBottom: Math.round(composer.bottom),
       navDisplay: getComputedStyle(document.querySelector('.bottom-nav')).display,
+      fullscreenDisplay: getComputedStyle(document.querySelector('#fullscreenButton')).display,
+      fullscreenBottom: Math.round(parseFloat(getComputedStyle(document.querySelector('#fullscreenButton')).bottom)),
     };
   });
   if (closed.keyboardOpen || closed.kbInset !== '0px' || closed.navDisplay === 'none') {
     throw new Error(`键盘关闭后未恢复：${JSON.stringify(closed)}`);
+  }
+  if (closed.fullscreenDisplay === 'none' || Math.abs(closed.fullscreenBottom - 224) > 2) {
+    throw new Error(`键盘关闭后全屏按钮位置未恢复：${JSON.stringify(closed)}`);
   }
   process.stdout.write(`${JSON.stringify({ opened, closed })}\n`);
 } finally {

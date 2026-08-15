@@ -31,6 +31,7 @@ const bootstrap = {
   pendingRequests: [],
   projects: { current: { name: 'a', path: '/proj/a' }, parent: '/proj', root: '/proj', entries: [{ name: 'b', path: '/proj/b' }] },
 };
+let favorites = [];
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -53,8 +54,25 @@ try {
       status, contentType: 'application/json; charset=utf-8', body: JSON.stringify(body),
     });
     if (pathname === '/api/auth/status') return fulfillJson({ authenticated: true });
-    if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
+    if (pathname === '/api/bootstrap') return fulfillJson({ ...bootstrap, favorites });
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
+    if (pathname === '/api/favorites/import' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const known = new Set(favorites.map((item) => item.id));
+      favorites = [...favorites, ...(body.items ?? []).filter((item) => !known.has(item.id))];
+      return fulfillJson({ data: favorites });
+    }
+    if (pathname === '/api/favorites' && route.request().method() === 'GET') return fulfillJson({ data: favorites });
+    if (pathname === '/api/favorites' && route.request().method() === 'POST') {
+      const item = JSON.parse(route.request().postData() || '{}');
+      favorites = [item, ...favorites.filter((entry) => entry.id !== item.id)];
+      return fulfillJson({ data: favorites });
+    }
+    if (pathname.startsWith('/api/favorites/') && route.request().method() === 'DELETE') {
+      const threadId = decodeURIComponent(pathname.slice('/api/favorites/'.length));
+      favorites = favorites.filter((item) => item.id !== threadId);
+      return fulfillJson({ data: favorites });
+    }
     if (pathname === '/api/projects') {
       const requested = url.searchParams.get('path');
       if (requested === '/proj/b') {
@@ -93,6 +111,7 @@ try {
   // 2) 回到会话列表收藏 A
   await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-star').click();
+  await page.locator('#mobileThreadList .thread-star.on').waitFor({ timeout: 5_000 });
   const starOn = await page.locator('#mobileThreadList .thread-star.on').count();
   if (starOn !== 1) throw new Error('收藏后星标未点亮');
 
@@ -102,7 +121,15 @@ try {
   const favoriteText = await page.locator('#favoriteList').textContent();
   if (!favoriteText.includes('会话A') || !favoriteText.includes('/proj/a')) throw new Error(`收藏页内容异常：${favoriteText}`);
 
-  // 4) 切到项目 B，收藏仍可见
+  // 4) 清空当前 WebView 的本地存储并刷新，收藏仍从服务端恢复
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
+  await page.locator('button[data-tab="favorites"]').click();
+  const restoredText = await page.locator('#favoriteList').textContent();
+  if (!restoredText.includes('会话A')) throw new Error(`清空本地数据后收藏未恢复：${restoredText}`);
+
+  // 5) 切到项目 B，收藏仍可见
   await page.locator('button[data-tab="projects"]').click();
   await page.locator('.project-button', { hasText: 'b' }).click();
   await page.locator('.project-button', { hasText: '使用当前目录' }).click();
@@ -112,7 +139,7 @@ try {
   const crossText = await page.locator('#favoriteList').textContent();
   if (!crossText.includes('会话A')) throw new Error('跨目录后收藏丢失');
 
-  // 5) 点击收藏 → 直接进入指定会话和目录
+  // 6) 点击收藏 → 直接进入指定会话和目录
   await page.locator('#favoriteList .thread-main').click();
   await page.locator('.agent-card', { hasText: '会话A内容' }).waitFor({ timeout: 10_000 });
   const projectName = await page.locator('#currentProjectName').textContent();
@@ -120,13 +147,32 @@ try {
   await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '会话A' }).waitFor({ timeout: 10_000 });
 
-  // 6) 收藏页取消收藏
+  // 7) 收藏页取消收藏
   await page.locator('button[data-tab="favorites"]').click();
   await page.locator('#favoriteList .thread-star').click();
+  await page.locator('#favoriteList .empty-list').waitFor({ timeout: 5_000 });
   const emptyText = await page.locator('#favoriteList').textContent();
   if (!emptyText.includes('还没有收藏')) throw new Error(`取消收藏后仍存在：${emptyText}`);
 
-  process.stdout.write(JSON.stringify({ favoriteText, crossText, projectName, emptyOk: true }));
+  // 8) 旧网页版 localStorage 收藏会自动迁移到服务端
+  await page.evaluate((legacy) => {
+    localStorage.setItem('codex-mobile-favorite-threads', JSON.stringify([legacy]));
+    localStorage.removeItem('codex-mobile-favorites-server-v1');
+  }, { id: threadB.id, name: threadB.name, cwd: threadB.cwd, updatedAt: threadB.updatedAt });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
+  await page.locator('button[data-tab="favorites"]').click();
+  const migratedText = await page.locator('#favoriteList').textContent();
+  if (!migratedText.includes('会话B')) throw new Error(`旧收藏未迁移：${migratedText}`);
+  const migrationState = await page.evaluate(() => ({
+    legacy: localStorage.getItem('codex-mobile-favorite-threads'),
+    migrated: localStorage.getItem('codex-mobile-favorites-server-v1'),
+  }));
+  if (migrationState.legacy !== null || migrationState.migrated !== '1') {
+    throw new Error(`旧收藏迁移标记异常：${JSON.stringify(migrationState)}`);
+  }
+
+  process.stdout.write(JSON.stringify({ favoriteText, restoredText, crossText, projectName, migratedText, emptyOk: true }));
 } finally {
   await browser.close();
 }

@@ -91,6 +91,8 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const officePath = path.join(project, 'sample.docx');
   const spreadsheetPath = path.join(project, 'sample.xlsx');
   const markdownPath = path.join(project, 'guide.md');
+  const outputDirectory = path.join(project, '最终材料');
+  const outputFile = path.join(outputDirectory, '最终报告.md');
   const relatedPngPath = path.join(project, 'related.png');
   const chinesePngPath = path.join(project, '上汽电池护照状态机-流程图-1.png');
   const dingtalkPngPath = path.join(project, 'dingtalk.png');
@@ -99,6 +101,8 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   fs.writeFileSync(officePath, 'office test fixture');
   fs.writeFileSync(spreadsheetPath, 'spreadsheet test fixture');
   fs.writeFileSync(markdownPath, '# Guide\n\n![图](./related.png)');
+  fs.mkdirSync(outputDirectory);
+  fs.writeFileSync(outputFile, '# 最终报告\n');
   fs.writeFileSync(relatedPngPath, Buffer.from([1, 2, 3, 4]));
   fs.writeFileSync(chinesePngPath, Buffer.from([5, 6, 7, 8]));
   fs.writeFileSync(dingtalkPngPath, Buffer.from([9, 9, 9, 9]));
@@ -134,10 +138,35 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
       return { success: true, result: { messageId: 'send-1', fileName } };
     },
   };
+  const installedSkillNames = [];
+  let marketSearchQuery = null;
+  const skillMarket = {
+    listCommunitySkills: async (search = '') => {
+      marketSearchQuery = search;
+      return [
+        { name: 'alpha-skill', installed: true, description: '', repo: 'demo/alpha', path: '', stars: 10, score: 60 },
+        { name: 'beta-skill', installed: false, description: 'beta 描述', repo: 'demo/beta', path: 'skills/beta', stars: 99, score: 88 },
+      ];
+    },
+    listOfficialSkills: async () => [
+      { name: 'official-skill', installed: false, description: '官方描述', repo: 'openai/skills', path: 'skills/.curated/official-skill' },
+    ],
+    installCommunitySkill: async ({ repo, path: skillPath, name }) => {
+      if (repo !== 'demo/beta' || skillPath !== 'skills/beta') throw new Error('技能不在当前社区列表中');
+      installedSkillNames.push(name);
+      return { installed: true };
+    },
+    installOfficialSkill: async (name) => {
+      if (name !== 'official-skill') throw new Error('技能不在官方精选列表中');
+      installedSkillNames.push(name);
+      return { installed: true };
+    },
+  };
   const app = createCodexMobileServer({
     config,
     bridge,
     dingtalk,
+    skillMarket,
     convertOfficeToPdf: async (filePath) => {
       assert.equal(filePath, officePath);
       return pdfPath;
@@ -166,6 +195,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   try {
+    const appScript = await fetch(`${base}/app.js?v=81`);
+    assert.equal(appScript.status, 200);
+    assert.equal(appScript.headers.get('cache-control'), 'no-cache');
+    const appShell = await fetch(`${base}/`);
+    assert.equal((await appShell.text()).includes('/app.js?v=81'), true);
     const denied = await fetch(`${base}/api/bootstrap`);
     assert.equal(denied.status, 401);
     const pairing = createPairingCode(config);
@@ -178,10 +212,174 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(bootstrap.status, 200);
     const payload = await bootstrap.json();
     assert.equal(payload.runtime.user, os.userInfo().username);
-    assert.equal(payload.models[0].id, 'test-model');
     assert.equal(payload.defaultModel, 'pinned-model');
     assert.equal(payload.defaultEffort, 'max');
-    assert.deepEqual(payload.collaborationModes.map((mode) => mode.mode), ['plan', 'default']);
+    assert.deepEqual(payload.favorites, []);
+    assert.equal(typeof payload.catalogsReady, 'boolean');
+    const catalogs = await fetch(`${base}/api/catalogs`, { headers: { Cookie: cookie } });
+    assert.equal(catalogs.status, 200);
+    const catalogPayload = await catalogs.json();
+    assert.equal(catalogPayload.models[0].id, 'test-model');
+    assert.deepEqual(catalogPayload.collaborationModes.map((mode) => mode.mode), ['plan', 'default']);
+    assert.equal(catalogPayload.defaultModel, 'pinned-model');
+    const originalArtifactList = app.tracker.list.bind(app.tracker);
+    app.tracker.list = (threadId) => threadId === 'artifact-page-thread'
+      ? Array.from({ length: 235 }, (_, index) => ({
+        id: `artifact-${index}`,
+        name: index === 205 ? '最终 PRD.md' : `文件-${index}.txt`,
+        relativePath: index === 205 ? 'docs/最终 PRD.md' : `tmp/文件-${index}.txt`,
+      }))
+      : originalArtifactList(threadId);
+    const artifactPage = await fetch(`${base}/api/threads/artifact-page-thread/artifacts?limit=100&offset=100`, { headers: { Cookie: cookie } });
+    assert.equal(artifactPage.status, 200);
+    const artifactPageBody = await artifactPage.json();
+    assert.equal(artifactPageBody.data.length, 100);
+    assert.equal(artifactPageBody.data[0].id, 'artifact-100');
+    assert.equal(artifactPageBody.total, 235);
+    assert.equal(artifactPageBody.nextOffset, 200);
+    const artifactSearch = await fetch(`${base}/api/threads/artifact-page-thread/artifacts?search=${encodeURIComponent('最终 PRD')}&limit=20`, { headers: { Cookie: cookie } });
+    const artifactSearchBody = await artifactSearch.json();
+    assert.equal(artifactSearchBody.total, 1);
+    assert.equal(artifactSearchBody.data[0].id, 'artifact-205');
+    assert.equal(artifactSearchBody.nextOffset, null);
+    const projectEntries = await fetch(`${base}/api/projects?path=${encodeURIComponent(project)}`, { headers: { Cookie: cookie } });
+    assert.equal(projectEntries.status, 200);
+    const projectEntriesBody = await projectEntries.json();
+    const projectMarkdown = projectEntriesBody.entries.find((entry) => entry.name === 'guide.md');
+    const projectDirectory = projectEntriesBody.entries.find((entry) => entry.name === '最终材料');
+    assert.equal(projectMarkdown.isDirectory, false);
+    assert.equal(projectMarkdown.fileKind, 'markdown');
+    assert.equal(projectMarkdown.path, markdownPath);
+    assert.equal(typeof projectMarkdown.token, 'string');
+    assert.equal(projectDirectory.path, outputDirectory);
+    assert.equal(projectDirectory.isDirectory, true);
+    assert.equal(projectDirectory.fileKind, 'directory');
+    const uploadedName = '手机上传.txt';
+    const uploadedPath = path.join(project, uploadedName);
+    const uploaded = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent(uploadedName)}`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('第一版'),
+    });
+    assert.equal(uploaded.status, 201);
+    const uploadedBody = await uploaded.json();
+    assert.equal(uploadedBody.uploaded, true);
+    assert.equal(uploadedBody.overwritten, false);
+    assert.equal(uploadedBody.artifact.name, uploadedName);
+    assert.equal(fs.readFileSync(uploadedPath, 'utf8'), '第一版');
+    const duplicateUpload = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent(uploadedName)}`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('不应覆盖'),
+    });
+    assert.equal(duplicateUpload.status, 409);
+    assert.equal((await duplicateUpload.json()).error, 'FILE_EXISTS');
+    assert.equal(fs.readFileSync(uploadedPath, 'utf8'), '第一版');
+    const overwritten = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent(uploadedName)}&overwrite=1`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('第二版'),
+    });
+    assert.equal(overwritten.status, 200);
+    assert.equal((await overwritten.json()).overwritten, true);
+    assert.equal(fs.readFileSync(uploadedPath, 'utf8'), '第二版');
+    const invalidUpload = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent('../escape.txt')}`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('escape'),
+    });
+    assert.equal(invalidUpload.status, 400);
+    assert.equal((await invalidUpload.json()).error, 'INVALID_UPLOAD_NAME');
+    assert.equal(fs.existsSync(path.join(root, 'escape.txt')), false);
+    const uploadSymlinkPath = path.join(project, 'upload-link.txt');
+    fs.symlinkSync(markdownPath, uploadSymlinkPath);
+    const symlinkUpload = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent('upload-link.txt')}&overwrite=1`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.from('symlink'),
+    });
+    assert.equal(symlinkUpload.status, 400);
+    assert.equal((await symlinkUpload.json()).error, 'UPLOAD_SYMLINK_NOT_ALLOWED');
+    assert.equal(fs.readFileSync(markdownPath, 'utf8'), '# Guide\n\n![图](./related.png)');
+    const oversizedUpload = await fetch(`${base}/api/projects/upload?path=${encodeURIComponent(project)}&name=${encodeURIComponent('oversized.bin')}`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' }, body: Buffer.alloc(config.maxFileBytes + 1),
+    });
+    assert.equal(oversizedUpload.status, 413);
+    assert.equal((await oversizedUpload.json()).error, 'UPLOAD_TOO_LARGE');
+    assert.equal(fs.existsSync(path.join(project, 'oversized.bin')), false);
+    assert.equal(fs.readdirSync(project).some((name) => name.startsWith('.codex-mobile-upload-')), false);
+    const uploadEntries = await fetch(`${base}/api/projects?path=${encodeURIComponent(project)}`, { headers: { Cookie: cookie } });
+    assert((await uploadEntries.json()).entries.some((entry) => entry.name === uploadedName && entry.fileKind === 'text'));
+    const managedDirectoryName = '手机新建目录';
+    const managedDirectoryPath = path.join(project, managedDirectoryName);
+    const createdDirectory = await fetch(`${base}/api/projects/entries`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: project, name: managedDirectoryName, type: 'directory' }),
+    });
+    assert.equal(createdDirectory.status, 201);
+    assert.equal((await createdDirectory.json()).artifact.fileKind, 'directory');
+    assert.equal(fs.statSync(managedDirectoryPath).isDirectory(), true);
+    const managedFileName = '新建说明.txt';
+    const managedFilePath = path.join(managedDirectoryPath, managedFileName);
+    const createdFile = await fetch(`${base}/api/projects/entries`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: managedDirectoryPath, name: managedFileName, type: 'file', content: '手机创建的内容' }),
+    });
+    assert.equal(createdFile.status, 201);
+    assert.equal((await createdFile.json()).artifact.fileKind, 'text');
+    assert.equal(fs.readFileSync(managedFilePath, 'utf8'), '手机创建的内容');
+    fs.writeFileSync(path.join(managedDirectoryPath, '待递归删除.txt'), 'nested');
+    const duplicateEntry = await fetch(`${base}/api/projects/entries`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: managedDirectoryPath, name: managedFileName, type: 'file' }),
+    });
+    assert.equal(duplicateEntry.status, 409);
+    assert.equal((await duplicateEntry.json()).error, 'ENTRY_EXISTS');
+    const invalidEntry = await fetch(`${base}/api/projects/entries`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: project, name: '../越界.txt', type: 'file' }),
+    });
+    assert.equal(invalidEntry.status, 400);
+    assert.equal((await invalidEntry.json()).error, 'INVALID_ENTRY_NAME');
+    const outsideEntry = await fetch(`${base}/api/projects/entries`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory: '/', name: '越界.txt', type: 'file' }),
+    });
+    assert.equal(outsideEntry.status, 403);
+    const nonRecursiveDelete = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: managedDirectoryPath, confirmName: managedDirectoryName, recursive: false }),
+    });
+    assert.equal(nonRecursiveDelete.status, 409);
+    assert.equal((await nonRecursiveDelete.json()).error, 'DIRECTORY_NOT_EMPTY');
+    const mismatchedDelete = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: managedFilePath, confirmName: '错误名称', recursive: false }),
+    });
+    assert.equal(mismatchedDelete.status, 400);
+    assert.equal((await mismatchedDelete.json()).error, 'DELETE_CONFIRMATION_MISMATCH');
+    const deletedFile = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: managedFilePath, confirmName: managedFileName, recursive: false }),
+    });
+    assert.equal(deletedFile.status, 200);
+    assert.equal((await deletedFile.json()).deleted, true);
+    assert.equal(fs.existsSync(managedFilePath), false);
+    const deletedDirectory = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: managedDirectoryPath, confirmName: managedDirectoryName, recursive: true }),
+    });
+    assert.equal(deletedDirectory.status, 200);
+    assert.equal((await deletedDirectory.json()).isDirectory, true);
+    assert.equal(fs.existsSync(managedDirectoryPath), false);
+    const rootDelete = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: root, confirmName: path.basename(root), recursive: true }),
+    });
+    assert.equal(rootDelete.status, 403);
+    assert.equal((await rootDelete.json()).error, 'PROJECT_ROOT_DELETE_FORBIDDEN');
+    const outsideDelete = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/etc/hosts', confirmName: 'hosts', recursive: false }),
+    });
+    assert.equal(outsideDelete.status, 403);
+    const symlinkDelete = await fetch(`${base}/api/projects/entry`, {
+      method: 'DELETE', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: uploadSymlinkPath, confirmName: path.basename(uploadSymlinkPath), recursive: false }),
+    });
+    assert.equal(symlinkDelete.status, 400);
+    assert.equal((await symlinkDelete.json()).error, 'ENTRY_SYMLINK_NOT_ALLOWED');
+    assert.equal(fs.existsSync(uploadSymlinkPath), true);
     const skills = await fetch(`${base}/api/skills`, { headers: { Cookie: cookie } });
     assert.equal(skills.status, 200);
     const skillNames = (await skills.json()).data.map((item) => item.name);
@@ -308,11 +506,28 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(ascPage.status, 200);
     assert.equal(bridge.lastTurnsListParams.sortDirection, 'asc');
     assert.equal(bridge.lastTurnsListParams.cursor, undefined);
+    const importedFavorites = await fetch(`${base}/api/favorites/import`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ id: 'thread-legacy', name: '网页版旧收藏', cwd: project, updatedAt: 1 }] }),
+    });
+    assert.equal(importedFavorites.status, 200);
+    assert.deepEqual((await importedFavorites.json()).data.map((item) => item.id), ['thread-legacy']);
+    const favoriteCreated = await fetch(`${base}/api/favorites`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'thread-1', name: '收藏的会话', cwd: project, updatedAt: 2 }),
+    });
+    assert.equal(favoriteCreated.status, 200);
+    assert.deepEqual((await favoriteCreated.json()).data.map((item) => item.id), ['thread-1', 'thread-legacy']);
+    const favorites = await fetch(`${base}/api/favorites`, { headers: { Cookie: cookie } });
+    assert.equal(favorites.status, 200);
+    assert.equal((await favorites.json()).data.length, 2);
     const renamed = await fetch(`${base}/api/threads/thread-1/name`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '新名字' }),
     });
     assert.equal(renamed.status, 200);
     assert.deepEqual(bridge.lastSetName, { threadId: 'thread-1', name: '新名字' });
+    const favoritesAfterRename = await fetch(`${base}/api/favorites`, { headers: { Cookie: cookie } });
+    assert.equal((await favoritesAfterRename.json()).data.find((item) => item.id === 'thread-1').name, '新名字');
     const invalidName = await fetch(`${base}/api/threads/thread-1/name`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '   ' }),
     });
@@ -323,6 +538,13 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(removed.status, 200);
     assert.deepEqual(bridge.lastDelete, { threadId: 'thread-1' });
     assert.deepEqual(await removed.json(), { deleted: true, result: { deleted: true } });
+    const favoritesAfterDelete = await fetch(`${base}/api/favorites`, { headers: { Cookie: cookie } });
+    assert.deepEqual((await favoritesAfterDelete.json()).data.map((item) => item.id), ['thread-legacy']);
+    const favoriteDeleted = await fetch(`${base}/api/favorites/thread-legacy`, {
+      method: 'DELETE', headers: { Cookie: cookie },
+    });
+    assert.equal(favoriteDeleted.status, 200);
+    assert.deepEqual((await favoriteDeleted.json()).data, []);
     const pdfToken = encodeURIComponent(createArtifactToken(pdfPath, config));
     const document = await fetch(`${base}/api/artifacts/${pdfToken}/document`, { headers: { Cookie: cookie } });
     assert.equal(document.status, 200);
@@ -354,6 +576,29 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const chineseDouble = await fetch(`${base}/api/artifacts/${relatedToken}/related?path=${encodeURIComponent(encodeURIComponent(chineseName))}`, { headers: { Cookie: cookie } });
     assert.equal(chineseDouble.status, 200);
     assert.deepEqual([...new Uint8Array(await chineseDouble.arrayBuffer())], [5, 6, 7, 8]);
+    const resolvedDirectory = await fetch(`${base}/api/files/resolve`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: outputDirectory, cwd: project }),
+    });
+    assert.equal(resolvedDirectory.status, 200);
+    const resolvedDirectoryBody = await resolvedDirectory.json();
+    assert.equal(resolvedDirectoryBody.artifact.fileKind, 'directory');
+    assert.equal(resolvedDirectoryBody.artifact.isDirectory, true);
+    const directoryToken = encodeURIComponent(resolvedDirectoryBody.artifact.token);
+    const directoryMeta = await fetch(`${base}/api/artifacts/${directoryToken}/meta`, { headers: { Cookie: cookie } });
+    assert.equal(directoryMeta.status, 200);
+    assert.equal((await directoryMeta.json()).fileKind, 'directory');
+    const directory = await fetch(`${base}/api/artifacts/${directoryToken}/directory`, { headers: { Cookie: cookie } });
+    assert.equal(directory.status, 200);
+    const directoryBody = await directory.json();
+    assert.equal(directoryBody.data[0].name, '最终报告.md');
+    assert.equal(directoryBody.data[0].fileKind, 'markdown');
+    assert.equal(directoryBody.parent.name, 'demo');
+    const escapedFile = await fetch(`${base}/api/files/resolve`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/etc/hostname', cwd: project }),
+    });
+    assert.equal(escapedFile.status, 403);
     const deniedDingtalk = await fetch(`${base}/api/dingtalk/messages`);
     assert.equal(deniedDingtalk.status, 401);
     const messages = await fetch(`${base}/api/dingtalk/messages`, { headers: { Cookie: cookie } });
@@ -386,6 +631,28 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
     });
     assert.equal(sentBadToken.status, 401);
+    const market = await fetch(`${base}/api/skills/market?search=beta`, { headers: { Cookie: cookie } });
+    assert.equal(market.status, 200);
+    const marketBody = await market.json();
+    assert.equal(marketBody.data.length, 2);
+    assert.equal(marketSearchQuery, 'beta');
+    assert.equal(marketBody.data[1].stars, 99);
+    const official = await fetch(`${base}/api/skills/market/official`, { headers: { Cookie: cookie } });
+    assert.equal(official.status, 200);
+    const officialBody = await official.json();
+    assert.equal(officialBody.data.length, 1);
+    assert.equal(officialBody.data[0].name, 'official-skill');
+    const installOk = await fetch(`${base}/api/skills/market/install`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'demo/beta', path: 'skills/beta', name: 'beta-skill' }),
+    });
+    assert.equal(installOk.status, 200);
+    assert.deepEqual(installedSkillNames, ['beta-skill']);
+    const installInvalid = await fetch(`${base}/api/skills/market/install`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'not-listed/foo', path: 'skills/foo', name: 'foo' }),
+    });
+    assert.equal(installInvalid.status, 400);
     const spreadsheetToken = encodeURIComponent(createArtifactToken(spreadsheetPath, config));
     const workbook = await fetch(`${base}/api/artifacts/${spreadsheetToken}/workbook`, { headers: { Cookie: cookie } });
     assert.equal(workbook.status, 200);

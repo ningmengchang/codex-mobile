@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createPairingCode, exchangePairingCode } from '../server/auth.mjs';
+import { loadConfig } from '../server/config.mjs';
 import { assertAllowedPath, createArtifactToken, verifyArtifactToken, verifyClaims } from '../server/security.mjs';
 
 function fixture() {
@@ -55,5 +56,26 @@ test('pairing codes are one-time and expire', () => {
     assert.throws(() => exchangePairingCode(expired.code, item.config, 700_001), /过期/);
   } finally {
     fs.rmSync(item.directory, { recursive: true, force: true });
+  }
+});
+
+test('mobile config defaults to the supported GPT model', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mobile-config-'));
+  const root = path.join(directory, 'root');
+  fs.mkdirSync(root);
+  const previousDefaultModel = process.env.CODEX_MOBILE_DEFAULT_MODEL;
+  delete process.env.CODEX_MOBILE_DEFAULT_MODEL;
+  try {
+    const config = loadConfig({
+      dataDir: path.join(directory, 'data'),
+      cacheDir: path.join(directory, 'cache'),
+      secret: 'test-secret',
+      allowedRoots: [root],
+    });
+    assert.equal(config.defaultModel, 'gpt-5.6-sol');
+  } finally {
+    if (previousDefaultModel === undefined) delete process.env.CODEX_MOBILE_DEFAULT_MODEL;
+    else process.env.CODEX_MOBILE_DEFAULT_MODEL = previousDefaultModel;
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
