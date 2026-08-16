@@ -12,8 +12,14 @@ const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdx']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.ico', '.svg']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.mkv', '.m4v']);
-const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.odt', '.xls', '.xlsx', '.ods', '.ppt', '.pptx', '.odp']);
+const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.odt', '.rtf', '.xls', '.xlsx', '.ods', '.ppt', '.pptx', '.odp']);
 const ARCHIVE_EXTENSIONS = new Set(['.zip', '.tar', '.gz', '.tgz', '.7z', '.rar', '.bz2', '.xz']);
+
+export const DOCUMENT_EXTENSIONS = new Set([
+  ...MARKDOWN_EXTENSIONS,
+  ...OFFICE_EXTENSIONS,
+  '.pdf', '.txt', '.csv', '.tsv',
+]);
 
 const MIME_TYPES = {
   '.avif': 'image/avif', '.bmp': 'image/bmp', '.css': 'text/css; charset=utf-8',
@@ -45,6 +51,10 @@ export function classifyFile(filePath) {
   if (ARCHIVE_EXTENSIONS.has(extension)) return 'archive';
   if (TEXT_EXTENSIONS.has(extension) || ['dockerfile', 'makefile', 'license'].includes(basename)) return 'text';
   return 'binary';
+}
+
+export function isDocumentPath(filePath) {
+  return DOCUMENT_EXTENSIONS.has(path.extname(String(filePath ?? '')).toLowerCase());
 }
 
 export function mimeType(filePath) {

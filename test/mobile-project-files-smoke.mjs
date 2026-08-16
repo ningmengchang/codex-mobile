@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { swipeLeft, swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -13,6 +14,10 @@ const markdown = {
   id: 'project-file-readme', name: 'README.md', path: '/proj/session/README.md', relativePath: 'README.md', fileKind: 'markdown',
   isDirectory: false, size: 128, modifiedAt: '2026-08-11T10:00:00.000Z', available: true, token: 'project-file-token',
 };
+const fillerEntries = Array.from({ length: 30 }, (_, index) => ({
+  name: `archive-${index + 1}`, path: `/proj/session/archive-${index + 1}`,
+  relativePath: `archive-${index + 1}`, isDirectory: true, fileKind: 'directory',
+}));
 const thread = {
   id: 'thread-session', cwd: '/proj/session', name: '当前工作会话', preview: '', status: 'idle', updatedAt: 2, turns: [],
 };
@@ -54,15 +59,18 @@ try {
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   let browsedDocs = false;
+  let includeFillerEntries = true;
   let uploadedFile = null;
   let managedEntries = [];
   const projectRequests = [];
   const uploadRequests = [];
   const createRequests = [];
   const deleteRequests = [];
+  let newThreadRequest = null;
   await page.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     const pathname = url.pathname;
+    const method = route.request().method();
     const fulfillJson = (body, status = 200) => route.fulfill({
       status, contentType: 'application/json; charset=utf-8', body: JSON.stringify(body),
     });
@@ -88,6 +96,7 @@ try {
           entries: [
             { name: 'docs', path: '/proj/session/docs', isDirectory: true, fileKind: 'directory' },
             markdown,
+            ...(includeFillerEntries ? fillerEntries : []),
             ...(uploadedFile ? [uploadedFile] : []),
             ...managedEntries.filter((entry) => entry.parent === '/proj/session'),
           ],
@@ -133,6 +142,10 @@ try {
         isDirectory: deleted?.isDirectory ?? body.recursive,
       });
     }
+    if (pathname === '/api/threads' && method === 'POST') {
+      newThreadRequest = route.request().postDataJSON();
+      return fulfillJson({ thread: { id: 'thread-docs', cwd: newThreadRequest.cwd, name: '文档会话', turns: [] } });
+    }
     if (pathname === '/api/threads') return fulfillJson({ data: [thread] });
     if (pathname === '/api/threads/thread-session' && route.request().method() === 'GET') return fulfillJson({ thread });
     if (pathname === '/api/threads/thread-session/resume') return fulfillJson({ thread });
@@ -173,12 +186,27 @@ try {
 
   await page.goto('http://127.0.0.1:39911/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '当前工作会话' }).click();
   await page.locator('#chatView.active').waitFor();
-  await page.locator('button[data-tab="projects"]').click();
+  await page.locator('#chatBackButton').click();
+  await page.locator('#threadsView.active').waitFor();
+  await swipeRight(page, '#threadsView');
   await page.locator('#projectsView.active').waitFor();
   await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session');
+
+  const projectHeadTop = await page.locator('.project-fixed-head').evaluate((element) => element.getBoundingClientRect().top);
+  await page.locator('.project-list-scroll').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await page.waitForFunction(() => document.querySelector('.project-list-scroll').scrollTop > 0);
+  const projectScrollLayout = await page.evaluate(() => ({
+    headTop: document.querySelector('.project-fixed-head').getBoundingClientRect().top,
+    viewScrollTop: document.querySelector('#projectsView').scrollTop,
+    listScrollTop: document.querySelector('.project-list-scroll').scrollTop,
+  }));
+  if (Math.abs(projectHeadTop - projectScrollLayout.headTop) > 1
+    || projectScrollLayout.viewScrollTop !== 0 || projectScrollLayout.listScrollTop <= 0) {
+    throw new Error(`文件管理页头部随列表滚动：${JSON.stringify({ projectHeadTop, projectScrollLayout })}`);
+  }
+  includeFillerEntries = false;
 
   const fileButton = page.locator('.project-button.project-file', { hasText: 'README.md' });
   await fileButton.waitFor();
@@ -223,8 +251,11 @@ try {
   if (await page.locator('#fileUploadPopover').isVisible()) {
     throw new Error('上传按钮不应默认显示');
   }
-  const fileDirectoryButton = page.locator('#fileDirectoryButton');
-  await longPress(fileDirectoryButton);
+  if (await page.locator('.project-button', { hasText: '使用当前目录' }).count()) {
+    throw new Error('文件目录仍显示“使用当前目录”入口');
+  }
+  const currentDirectoryEntry = page.locator('#projectPath');
+  await longPress(currentDirectoryEntry);
   if (!await page.locator('#uploadProjectFilesButton').isVisible()
     || !await page.locator('#createProjectFileButton').isVisible()
     || !await page.locator('#createProjectDirectoryButton').isVisible()
@@ -232,17 +263,19 @@ try {
     throw new Error('当前目录长按操作项错误');
   }
   const uploadPopoverPosition = await page.evaluate(() => {
-    const trigger = document.querySelector('#fileDirectoryButton').getBoundingClientRect();
     const popover = document.querySelector('#fileUploadPopover').getBoundingClientRect();
     return {
-      triggerCenter: Math.round(trigger.left + trigger.width / 2),
-      popoverCenter: Math.round(popover.left + popover.width / 2),
+      left: Math.round(popover.left),
+      right: Math.round(popover.right),
+      top: Math.round(popover.top),
       popoverBottom: Math.round(popover.bottom),
-      triggerTop: Math.round(trigger.top),
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
     };
   });
-  if (Math.abs(uploadPopoverPosition.triggerCenter - uploadPopoverPosition.popoverCenter) > 8
-    || uploadPopoverPosition.popoverBottom > uploadPopoverPosition.triggerTop) {
+  if (uploadPopoverPosition.left < 0 || uploadPopoverPosition.top < 0
+    || uploadPopoverPosition.right > uploadPopoverPosition.viewportWidth
+    || uploadPopoverPosition.popoverBottom > uploadPopoverPosition.viewportHeight) {
     throw new Error(`长按上传按钮位置错误：${JSON.stringify(uploadPopoverPosition)}`);
   }
   const chooserPromise = page.waitForEvent('filechooser');
@@ -255,7 +288,7 @@ try {
     throw new Error(`文件上传请求错误：${JSON.stringify(uploadRequests)}`);
   }
 
-  await longPress(fileDirectoryButton);
+  await longPress(currentDirectoryEntry);
   await page.locator('#createProjectDirectoryButton').click();
   await page.locator('#projectCreateDialog[open]').waitFor();
   await page.locator('#projectCreateName').fill('手机资料');
@@ -280,6 +313,7 @@ try {
   await page.locator('#createProjectFileButton').click();
   await page.locator('#projectCreateDialog[open]').waitFor();
   await page.locator('#projectCreateName').fill('说明.txt');
+  await page.locator('#projectCreateContent').click();
   await page.locator('#projectCreateContent').fill('目录中创建的文件');
   await page.locator('#confirmProjectCreateButton').click();
   if (createRequests[1]?.directory !== '/proj/session/手机资料' || createRequests[1]?.name !== '说明.txt'
@@ -369,15 +403,25 @@ try {
   await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session/docs');
   if (!browsedDocs) throw new Error('文件夹导航未保留');
 
-  await page.locator('button[data-tab="chat"]').click();
-  await page.locator('button[data-tab="projects"]').click();
-  await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session');
-  await page.locator('.project-button.project-file', { hasText: 'README.md' }).waitFor();
-  if (projectRequests.at(-1) !== '/proj/session') {
-    throw new Error(`重新进入文件页未回到当前会话目录：${JSON.stringify(projectRequests)}`);
+  await swipeLeft(page, '#projectsView');
+  await page.locator('#threadsView.active').waitFor();
+  await swipeRight(page, '#threadsView');
+  await page.locator('#projectsView.active').waitFor();
+  await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session/docs');
+  if (projectRequests.at(-1) !== '/proj/session/docs') {
+    throw new Error(`重新进入文件页未保留已选目录：${JSON.stringify(projectRequests)}`);
   }
 
-  process.stdout.write(`${JSON.stringify({ directoryActions: true, createDirectory: true, createFile: true, deleteFile: true, deleteDirectory: true, longPressUpload: true, fileUpload: true, filePreview: true, fileShare: true, previewShare: true, shareFallback: true, shareButtonWidth, directoryNavigation: true, resetToConversationDirectory: true, uploadPopoverPosition, directoryTypography, previewTypography })}\n`);
+  await page.locator('#mobileNewThreadButton').click();
+  await page.locator('#chatView.active').waitFor();
+  if (newThreadRequest?.cwd !== '/proj/session/docs') {
+    throw new Error(`加号没有使用正在浏览的目录创建会话：${JSON.stringify(newThreadRequest)}`);
+  }
+  if (await page.locator('#currentProjectName').textContent() !== 'docs') {
+    throw new Error('新会话创建后当前目录名称未同步');
+  }
+
+  process.stdout.write(`${JSON.stringify({ currentDirectoryEntryRemoved: true, browsingDirectoryCreatesThread: true, selectedDirectoryPersisted: true, directoryActions: true, createDirectory: true, createFile: true, deleteFile: true, deleteDirectory: true, longPressUpload: true, fileUpload: true, filePreview: true, fileShare: true, previewShare: true, shareFallback: true, shareButtonWidth, directoryNavigation: true, uploadPopoverPosition, directoryTypography, previewTypography })}\n`);
 } finally {
   await browser.close();
 }

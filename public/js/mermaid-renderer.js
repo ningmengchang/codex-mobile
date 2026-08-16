@@ -3,6 +3,22 @@ import { escapeHtml, getMermaidSource, releaseMermaidSource } from './format.js'
 let mermaidPromise = null;
 let mermaidApi = null;
 let renderSequence = 0;
+let mermaidTheme = document.documentElement.dataset.theme === 'light' ? 'neutral' : 'dark';
+
+function mermaidConfig() {
+  return {
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: mermaidTheme,
+    useMaxWidth: true,
+    fontFamily: 'Inter, ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+  };
+}
+
+export function setMermaidTheme(theme) {
+  mermaidTheme = theme === 'light' ? 'neutral' : 'dark';
+  if (mermaidApi) mermaidApi.initialize(mermaidConfig());
+}
 
 function loadMermaid() {
   if (mermaidApi) return Promise.resolve(mermaidApi);
@@ -16,13 +32,7 @@ function loadMermaid() {
         reject(new Error('Mermaid 加载失败'));
         return;
       }
-      api.initialize({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        theme: 'dark',
-        useMaxWidth: true,
-        fontFamily: 'Inter, ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
-      });
+      api.initialize(mermaidConfig());
       mermaidApi = api;
       resolve(api);
     };

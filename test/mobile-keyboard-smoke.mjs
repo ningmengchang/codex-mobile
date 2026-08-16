@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -65,6 +66,9 @@ try {
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
     if (pathname === '/api/threads' && route.request().method() === 'GET') return fulfillJson({ data: [] });
+    if (pathname === '/api/threads' && route.request().method() === 'POST') {
+      return fulfillJson({ thread: { id: 'thread-new', cwd: '/home/ningmengchang', name: '键盘测试', turns: [] } });
+    }
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
@@ -77,6 +81,10 @@ try {
 
   await page.goto('http://127.0.0.1:39902/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
+  await swipeRight(page, '#threadsView');
+  await page.locator('#projectsView.active').waitFor({ timeout: 5_000 });
+  await page.locator('#mobileNewThreadButton').click();
+  await page.locator('#chatView.active').waitFor({ timeout: 5_000 });
   await page.locator('#promptInput').focus();
   await page.waitForFunction(() => document.body.classList.contains('keyboard-open'), null, { timeout: 5_000 });
   await page.evaluate(() => window.__keyboard.setHeight(544));
@@ -84,7 +92,6 @@ try {
 
   const opened = await page.evaluate(() => {
     const composer = document.querySelector('#composer').getBoundingClientRect();
-    const nav = document.querySelector('.bottom-nav');
     const fullscreen = document.querySelector('#fullscreenButton');
     const scrollQuestion = document.querySelector('#jumpQuestionButton');
     const scrollLatest = document.querySelector('#scrollLatestButton');
@@ -92,7 +99,7 @@ try {
       keyboardOpen: document.body.classList.contains('keyboard-open'),
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
       composerBottom: Math.round(composer.bottom),
-      navDisplay: getComputedStyle(nav).display,
+      navigationRemoved: !document.querySelector('.bottom-nav'),
       fullscreenDisplay: getComputedStyle(fullscreen).display,
       fullscreenBottom: Math.round(parseFloat(getComputedStyle(fullscreen).bottom)),
       scrollQuestionBottom: Math.round(parseFloat(getComputedStyle(scrollQuestion).bottom)),
@@ -101,10 +108,10 @@ try {
   });
   if (!opened.keyboardOpen || opened.kbInset !== '300px') throw new Error(`键盘态未生效：${JSON.stringify(opened)}`);
   if (opened.composerBottom > 548 || opened.composerBottom < 540) throw new Error(`输入框未抬到键盘上方：${JSON.stringify(opened)}`);
-  if (opened.navDisplay !== 'none') throw new Error(`键盘打开时底部导航未隐藏：${JSON.stringify(opened)}`);
+  if (!opened.navigationRemoved) throw new Error(`键盘打开时仍存在底部导航：${JSON.stringify(opened)}`);
   if (opened.fullscreenDisplay === 'none') throw new Error(`键盘打开时全屏按钮不应隐藏：${JSON.stringify(opened)}`);
   if (opened.fullscreenBottom <= opened.scrollQuestionBottom) throw new Error(`全屏按钮未保持在上一个问题上方：${JSON.stringify(opened)}`);
-  if (Math.abs(opened.fullscreenBottom - 524) > 2 || Math.abs(opened.scrollQuestionBottom - 490) > 2) {
+  if (Math.abs(opened.fullscreenBottom - 462) > 2 || Math.abs(opened.scrollQuestionBottom - 422) > 2) {
     throw new Error(`键盘打开时悬浮按钮未随键盘上移：${JSON.stringify(opened)}`);
   }
 
@@ -118,15 +125,15 @@ try {
       keyboardOpen: document.body.classList.contains('keyboard-open'),
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
       composerBottom: Math.round(composer.bottom),
-      navDisplay: getComputedStyle(document.querySelector('.bottom-nav')).display,
+      navigationRemoved: !document.querySelector('.bottom-nav'),
       fullscreenDisplay: getComputedStyle(document.querySelector('#fullscreenButton')).display,
       fullscreenBottom: Math.round(parseFloat(getComputedStyle(document.querySelector('#fullscreenButton')).bottom)),
     };
   });
-  if (closed.keyboardOpen || closed.kbInset !== '0px' || closed.navDisplay === 'none') {
+  if (closed.keyboardOpen || closed.kbInset !== '0px' || !closed.navigationRemoved) {
     throw new Error(`键盘关闭后未恢复：${JSON.stringify(closed)}`);
   }
-  if (closed.fullscreenDisplay === 'none' || Math.abs(closed.fullscreenBottom - 224) > 2) {
+  if (closed.fullscreenDisplay === 'none' || Math.abs(closed.fullscreenBottom - 162) > 2) {
     throw new Error(`键盘关闭后全屏按钮位置未恢复：${JSON.stringify(closed)}`);
   }
   process.stdout.write(`${JSON.stringify({ opened, closed })}\n`);

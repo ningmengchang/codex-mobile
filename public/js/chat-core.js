@@ -8,7 +8,7 @@
  * 3. 回合追加：新回合由视图层 append，本模块只负责状态合并。
  */
 import { api } from './http.js';
-import { state, THREAD_CACHE_MAX, MAIN_ITEM_TYPES, DELIVERABLE_KINDS, DELIVERABLE_KEYWORDS } from './state.js';
+import { state, THREAD_CACHE_MAX, MAIN_ITEM_TYPES, DOCUMENT_KINDS, DOCUMENT_EXTENSIONS } from './state.js';
 import { escapeHtml, markdown, formatTurnTime } from './format.js';
 
 export async function fetchTurnPage(threadId, options = {}) {
@@ -114,17 +114,18 @@ export function artifactSortTime(artifact) {
   return new Date(artifact.modifiedAt || artifact.capturedAt || 0).getTime() || 0;
 }
 
-export function isDeliverableArtifact(artifact) {
+export function isDocumentArtifact(artifact) {
   if (!artifact) return false;
-  if (DELIVERABLE_KINDS.has(artifact.fileKind)) return true;
-  const haystack = `${artifact.name ?? ''}`.toLowerCase();
-  return DELIVERABLE_KEYWORDS.some((keyword) => haystack.includes(keyword.toLowerCase()));
+  if (DOCUMENT_KINDS.has(artifact.fileKind)) return true;
+  const candidate = String(artifact.relativePath ?? artifact.name ?? '').toLowerCase();
+  const dot = candidate.lastIndexOf('.');
+  return dot >= 0 && DOCUMENT_EXTENSIONS.has(candidate.slice(dot));
 }
 
 export function buildTurnArtifactIndex(artifacts) {
   const index = new Map();
   for (const artifact of artifacts) {
-    if (!artifact.available || !isDeliverableArtifact(artifact)) continue;
+    if (!artifact.available || !isDocumentArtifact(artifact)) continue;
     let list = index.get(artifact.turnId);
     if (!list) {
       list = [];

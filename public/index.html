@@ -3,11 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#101318">
+  <meta id="themeColorMeta" name="theme-color" content="#101318">
+  <script>
+    (() => {
+      let theme = 'dark';
+      try { theme = localStorage.getItem('codex-mobile-theme') === 'light' ? 'light' : 'dark'; } catch {}
+      document.documentElement.dataset.theme = theme;
+      document.querySelector('#themeColorMeta').content = theme === 'light' ? '#f3f5f7' : '#101318';
+    })();
+  </script>
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=65">
+  <link rel="stylesheet" href="/styles.css?v=82">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -42,6 +50,11 @@
       </aside>
 
       <section id="chatView" class="view chat-view active" data-view="chat">
+        <header id="chatDetailHeader" class="chat-detail-header" hidden>
+          <button id="chatBackButton" class="chat-back-button" type="button" aria-label="返回会话列表">‹</button>
+          <span class="chat-detail-title"><strong id="chatDetailName">未命名会话</strong><small id="chatDetailMeta"></small></span>
+          <button id="chatThreadMoreButton" class="chat-detail-more" type="button" aria-label="会话操作" title="会话操作">⋯</button>
+        </header>
         <div id="emptyState" class="empty-state">
           <span class="empty-orbit"><i></i></span>
           <p class="eyebrow">READY WHEN YOU ARE</p>
@@ -87,27 +100,65 @@
       </section>
 
       <section id="threadsView" class="view" data-view="threads">
-        <div class="section-head"><div><p class="eyebrow">HISTORY</p></div><button id="mobileNewThreadButton" class="icon-button" aria-label="新建会话" title="新建会话">+</button></div>
-        <div id="mobileThreadList" class="thread-list mobile"></div>
-      </section>
-
-      <section id="favoritesView" class="view" data-view="favorites">
-        <div class="section-head"><div><p class="eyebrow">FAVORITES</p></div></div>
-        <div id="favoriteList" class="thread-list mobile"></div>
+        <div class="section-head thread-home-head">
+          <div class="thread-home-title">
+            <h2>会话</h2>
+            <small id="threadSummary">最近会话</small>
+          </div>
+        </div>
+        <div class="thread-toolbar">
+          <input id="threadSearch" type="search" placeholder="搜索会话、内容或项目" autocomplete="off" enterkeyhint="search">
+          <div id="threadFilters" class="thread-filters" aria-label="筛选会话">
+            <span class="thread-filter-group" role="group" aria-label="目录范围">
+              <button type="button" data-thread-scope="all" class="active" aria-pressed="true">全部目录</button>
+              <button id="currentDirectoryThreadFilter" type="button" data-thread-scope="directory" aria-pressed="false">当前目录</button>
+            </span>
+            <i class="thread-filter-divider" aria-hidden="true"></i>
+            <span class="thread-filter-group" role="group" aria-label="收藏筛选">
+              <button id="threadFavoriteToggle" type="button" data-thread-favorite-toggle aria-pressed="false">收藏</button>
+            </span>
+            <i class="thread-filter-divider" aria-hidden="true"></i>
+            <span class="thread-filter-group" role="group" aria-label="会话状态">
+              <button type="button" data-thread-filter="all" class="active" aria-pressed="true">全部状态</button>
+              <button type="button" data-thread-filter="active" aria-pressed="false">进行中</button>
+              <button type="button" data-thread-filter="attention" aria-pressed="false">待处理</button>
+              <button type="button" data-thread-filter="unread" aria-pressed="false">未读</button>
+            </span>
+          </div>
+        </div>
+        <div class="thread-list-scroll">
+          <div id="mobileThreadList" class="thread-list mobile"></div>
+          <button id="loadMoreThreadsButton" class="load-more-threads" type="button" hidden>加载更多会话</button>
+        </div>
       </section>
 
       <section id="artifactsView" class="view" data-view="artifacts">
-        <div class="section-head"><div><p class="eyebrow">OUTPUTS</p></div><button id="refreshArtifactsButton" class="text-button">刷新</button></div>
-        <input id="artifactSearch" class="artifact-search" type="search" placeholder="搜索文件名或路径" autocomplete="off" enterkeyhint="search">
+        <header class="artifact-detail-header">
+          <button id="artifactBackButton" class="artifact-back-button" type="button" aria-label="返回当前聊天">‹</button>
+          <span class="artifact-detail-title"><strong id="artifactDetailName">未命名会话</strong><small id="artifactScope">全部历史文档</small></span>
+          <button id="refreshArtifactsButton" class="artifact-refresh-button" type="button">刷新</button>
+        </header>
+        <input id="artifactSearch" class="artifact-search" type="search" placeholder="搜索历史文档" autocomplete="off" enterkeyhint="search">
         <div id="artifactList" class="artifact-list"></div>
       </section>
 
       <section id="projectsView" class="view" data-view="projects">
-        <div class="section-head"><div><p class="eyebrow">WORKSPACES</p><h2>项目与文件</h2></div><button id="desktopUploadProjectFilesButton" class="file-upload-button" type="button">↑ 上传</button></div>
+        <div class="project-fixed-head">
+          <div class="section-head project-screen-head">
+            <div class="project-screen-title"><h2>文件目录</h2></div>
+            <div class="project-screen-actions">
+              <button id="desktopUploadProjectFilesButton" class="file-upload-button" type="button">↑ 上传</button>
+              <button id="settingsButton" class="project-settings-button" type="button" aria-label="设置" title="设置">⚙</button>
+            </div>
+          </div>
+          <button id="projectUpButton" class="path-button" hidden>← 返回上一级</button>
+          <button id="projectPath" class="project-path" type="button" aria-label="管理当前目录"></button>
+        </div>
         <input id="projectFileInput" type="file" multiple hidden>
-        <button id="projectUpButton" class="path-button" hidden>← 返回上一级</button>
-        <p id="projectPath" class="project-path"></p>
-        <div id="projectList" class="project-list"></div>
+        <div class="project-list-scroll">
+          <div id="projectList" class="project-list"></div>
+        </div>
+        <button id="mobileNewThreadButton" class="project-new-thread" type="button" aria-label="新建会话" title="新建会话">+</button>
       </section>
 
       <section id="dingtalkView" class="view" data-view="dingtalk">
@@ -116,14 +167,6 @@
       </section>
     </main>
 
-    <nav class="bottom-nav" aria-label="主导航">
-      <button data-tab="threads"><span>≡</span><small>会话</small></button>
-      <button data-tab="favorites"><span>☆</span><small>收藏</small></button>
-      <button data-tab="chat" class="active nav-primary"><span>◒</span><small>控制</small></button>
-      <button data-tab="artifacts"><span>◇</span><small>产出物</small><i id="artifactBadge" hidden></i></button>
-      <button id="fileDirectoryButton" data-tab="projects" aria-label="文件目录，长按可上传文件" aria-haspopup="menu" aria-expanded="false"><span>⌁</span><small>文件目录</small></button>
-      <button id="settingsButton" class="nav-settings" aria-label="设置" title="设置"><span>⚙</span><small>设置</small></button>
-    </nav>
     <div id="fileUploadPopover" class="file-upload-popover" data-anchor="nav" role="menu" hidden>
       <strong id="fileActionTargetName" class="file-action-target">当前目录</strong>
       <div class="file-action-buttons">
@@ -146,6 +189,9 @@
       </select></label>
       <label><span>审批</span><select id="approvalReviewerSelect" aria-label="权限审批方式">
         <option value="never">从不问我</option><option value="auto_review">模型决定</option><option value="user">每次问我</option>
+      </select></label>
+      <label><span>主题</span><select id="themeSelect" aria-label="界面主题">
+        <option value="dark">深色</option><option value="light">浅色</option>
       </select></label>
       <p id="settingsRuntime" class="settings-runtime"></p>
     </div>
@@ -185,6 +231,7 @@
   <dialog id="threadActionDialog" class="settings-dialog">
     <header><strong>会话操作</strong><button id="closeThreadActionButton" class="icon-button" aria-label="关闭">×</button></header>
     <div class="settings-body">
+      <button id="threadArtifactsAction" type="button" class="thread-action-row" hidden>查看文档</button>
       <button id="threadRenameAction" type="button" class="thread-action-row">重命名</button>
       <button id="threadDeleteAction" type="button" class="thread-action-row danger">删除会话</button>
       <div id="threadDeleteConfirm" hidden>
@@ -265,6 +312,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=81"></script>
+  <script type="module" src="/app.js?v=102"></script>
 </body>
 </html>

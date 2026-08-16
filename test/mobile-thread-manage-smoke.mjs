@@ -89,16 +89,36 @@ try {
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
 
   // 打开会话后收藏
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '会话A' }).click();
   await page.locator('.agent-card', { hasText: '会话A内容' }).waitFor({ timeout: 10_000 });
-  await page.locator('button[data-tab="threads"]').click();
+
+  // 具体聊天右上角菜单显示产出物入口，并以二级页打开后返回原聊天
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
+  if (await page.locator('#threadArtifactsAction').isHidden()) throw new Error('聊天右上角菜单缺少产出物入口');
+  if (await page.locator('#threadArtifactsAction').textContent() !== '查看文档') throw new Error('聊天右上角文档入口文案错误');
+  if (!await page.locator('#threadRenameAction').isHidden() || !await page.locator('#threadDeleteAction').isHidden()) {
+    throw new Error('聊天右上角菜单不应显示重命名或删除会话');
+  }
+  await page.locator('#threadArtifactsAction').click();
+  await page.locator('#artifactsView.active').waitFor({ timeout: 5_000 });
+  if (!await page.evaluate(() => location.hash === '#artifacts/t-a' && document.body.classList.contains('mobile-artifacts-detail'))) {
+    throw new Error('产出物未作为当前聊天的二级页打开');
+  }
+  await page.locator('#artifactBackButton').click();
+  await page.locator('#chatView.active').waitFor({ timeout: 5_000 });
+  await page.locator('#chatBackButton').click();
+  await page.locator('#threadsView.active').waitFor({ timeout: 5_000 });
   await page.locator('#mobileThreadList .thread-star').click();
   await page.locator('#mobileThreadList .thread-star.on').waitFor({ timeout: 5_000 });
 
   // 重命名（先非法名称，再合法）
   await page.locator('#mobileThreadList .thread-more').click();
   await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
+  if (!await page.locator('#threadArtifactsAction').isHidden()) throw new Error('会话列表三点菜单不应显示产出物入口');
+  if (await page.locator('#threadRenameAction').isHidden() || await page.locator('#threadDeleteAction').isHidden()) {
+    throw new Error('会话列表三点菜单应保留重命名和删除会话');
+  }
   await page.locator('#threadRenameAction').click();
   await page.locator('#threadRenameDialog[open]').waitFor({ timeout: 5_000 });
   await page.locator('#threadRenameInput').fill('   ');
@@ -112,12 +132,12 @@ try {
   if (!rowText.includes('会话A新名')) throw new Error(`改名未生效：${rowText}`);
 
   // 收藏同步新名称
-  await page.locator('button[data-tab="favorites"]').click();
-  const favoriteText = await page.locator('#favoriteList').textContent();
+  await page.locator('#threadFavoriteToggle').click();
+  const favoriteText = await page.locator('#mobileThreadList').textContent();
   if (!favoriteText.includes('会话A新名')) throw new Error(`收藏未同步新名称：${favoriteText}`);
 
   // 删除：当前会话被删除后聊天区回到空状态、收藏移除
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#threadFavoriteToggle').click();
   await page.locator('#mobileThreadList .thread-more').click();
   await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
   await page.locator('#threadDeleteAction').click();
@@ -126,10 +146,9 @@ try {
   await page.waitForFunction(() => !document.querySelector('#threadActionDialog').hasAttribute('open'), null, { timeout: 5_000 });
   const listAfterDelete = await page.locator('#mobileThreadList').textContent();
   if (listAfterDelete.includes('会话A')) throw new Error(`删除后仍存在：${listAfterDelete}`);
-  await page.locator('button[data-tab="favorites"]').click();
-  const favoriteAfterDelete = await page.locator('#favoriteList').textContent();
+  await page.locator('#threadFavoriteToggle').click();
+  const favoriteAfterDelete = await page.locator('#mobileThreadList').textContent();
   if (!favoriteAfterDelete.includes('还没有收藏')) throw new Error(`收藏未同步删除：${favoriteAfterDelete}`);
-  await page.locator('button[data-tab="chat"]').click();
   const chatEmpty = await page.evaluate(() => !document.querySelector('#emptyState').hidden);
   if (!chatEmpty) throw new Error('删除当前会话后聊天区未清空');
 

@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { createRequire } from 'node:module';
+import { swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -30,14 +31,14 @@ try {
     scrollWidth: document.documentElement.scrollWidth,
     status: document.querySelector('#connectionStatus span')?.textContent,
     project: document.querySelector('#currentProjectName')?.textContent,
-    navigation: [...document.querySelectorAll('.bottom-nav button')].map((element) => element.textContent.trim()),
+    navigationRemoved: !document.querySelector('.bottom-nav'),
     modes: [...document.querySelectorAll('#modeSwitch button')].map((element) => element.textContent.trim()),
     reviewer: document.querySelector('#approvalReviewerSelect')?.value,
   }));
   await page.locator('#modeSwitch button[data-mode="plan"]').click();
   result.planNotice = await page.locator('#modeNotice').textContent();
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-390.png', fullPage: true });
-  await page.locator('button[data-tab="projects"]').click();
+  await swipeRight(page, '#threadsView');
   await page.locator('#projectList .project-button').first().waitFor();
   result.projects = await page.locator('#projectList .project-button').count();
   if (result.modes.join(',') !== '执行,规划') throw new Error(`模式控件异常：${result.modes.join(',')}`);

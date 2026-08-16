@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { classifyFile, fileMetadata, findRecentFiles, IGNORED_DIRECTORIES } from './files.mjs';
+import { classifyFile, fileMetadata, IGNORED_DIRECTORIES, isDocumentPath } from './files.mjs';
+import { isArtifactPathVisible } from './conversation-artifacts.mjs';
 import { assertAllowedPath, createArtifactToken, isInside } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -75,13 +76,18 @@ export class ArtifactTracker {
     this.storePath = path.join(config.dataDir, 'artifacts.json');
     this.targetUid = fs.statSync('/home/ningmengchang').uid;
     this.targetGid = fs.statSync('/home/ningmengchang').gid;
+    this.userHome = fs.realpathSync('/home/ningmengchang');
     this.#load();
   }
 
   #load() {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.storePath, 'utf8'));
-      if (Array.isArray(parsed.items)) this.items = parsed.items.slice(-1000);
+      if (Array.isArray(parsed.items)) {
+        this.items = parsed.items
+          .filter((item) => isDocumentPath(item.relativePath ?? item.path ?? item.name))
+          .slice(-5000);
+      }
       if (parsed.threadProjects && typeof parsed.threadProjects === 'object') {
         this.threadProjects = new Map(Object.entries(parsed.threadProjects));
       }
@@ -91,7 +97,7 @@ export class ArtifactTracker {
   #persist() {
     const temp = `${this.storePath}.tmp`;
     const data = JSON.stringify({
-      items: this.items.slice(-1000),
+      items: this.items.slice(-5000),
       threadProjects: Object.fromEntries(this.threadProjects),
     });
     fs.writeFileSync(temp, `${data}\n`, { mode: 0o600 });
@@ -153,13 +159,23 @@ export class ArtifactTracker {
 
     await this.#restoreOwnership(capture, after, changedPaths);
     const artifacts = [];
+    const protocolPaths = new Set(capture.protocolChanges.keys());
+    const broadHomeCapture = capture.cwd === this.userHome;
     for (const [entryPath, status] of changedPaths) {
       const state = after.get(entryPath);
       if (state?.isDirectory || entryPath === capture.cwd) continue;
+      const relativePath = path.relative(capture.cwd, entryPath);
+      if (!isArtifactPathVisible(relativePath)) continue;
+      if (!isDocumentPath(relativePath)) continue;
+      const protocolChange = protocolPaths.has(entryPath);
+      // A home-directory snapshot also sees browser, DingTalk and editor writes.
+      // Only protocol-declared changes are trustworthy there; final-answer file
+      // links are recovered separately for shell-created deliverables.
+      if (broadHomeCapture && !protocolChange) continue;
       const exists = Boolean(state?.isFile);
       let metadata = {
         name: path.basename(entryPath),
-        relativePath: path.relative(capture.cwd, entryPath),
+        relativePath,
         fileKind: classifyFile(entryPath),
         size: 0,
         modifiedAt: new Date().toISOString(),
@@ -173,6 +189,7 @@ export class ArtifactTracker {
         turnId: capture.turnId,
         projectPath: capture.cwd,
         path: entryPath,
+        source: protocolChange ? 'protocol' : 'filesystem',
         status: status === 'delete' ? 'deleted' : status,
         capturedAt: new Date().toISOString(),
         ...metadata,
@@ -180,7 +197,7 @@ export class ArtifactTracker {
     }
 
     const ids = new Set(artifacts.map((item) => item.id));
-    this.items = this.items.filter((item) => !ids.has(item.id)).concat(artifacts).slice(-1000);
+    this.items = this.items.filter((item) => !ids.has(item.id)).concat(artifacts).slice(-5000);
     this.#persist();
     this.eventHub?.publish('artifacts', { threadId, turnId: capture.turnId, items: this.present(artifacts) });
     return this.present(artifacts);
@@ -233,21 +250,12 @@ export class ArtifactTracker {
   }
 
   list(threadId) {
-    const tracked = this.items.filter((item) => item.threadId === threadId).slice().reverse();
-    if (tracked.length) return this.present(tracked);
-    const cwd = this.threadProjects.get(threadId);
-    if (!cwd || !fs.existsSync(cwd)) return [];
-    return findRecentFiles(cwd, { limit: 40 }).map(({ path: filePath, ...metadata }) => ({
-      id: `recent:${threadId}:${metadata.relativePath}`,
-      threadId,
-      turnId: null,
-      projectPath: cwd,
-      path: undefined,
-      status: 'recent',
-      capturedAt: metadata.modifiedAt,
-      ...metadata,
-      available: true,
-      token: createArtifactToken(filePath, this.config),
-    }));
+    const tracked = this.items.filter((item) => {
+      if (item.threadId !== threadId || !isArtifactPathVisible(item.relativePath) || !isDocumentPath(item.relativePath)) return false;
+      // Older captures rooted at HOME did not record their source and contain
+      // unrelated background files. Do not expose those as conversation output.
+      return !(item.projectPath === this.userHome && !item.source);
+    }).slice().reverse();
+    return this.present(tracked).filter((item) => item.available);
   }
 }

@@ -17,6 +17,8 @@ class FakeBridge extends EventEmitter {
     this.responses = [];
     this.failRollout = null;
     this.nextThreadId = null;
+    this.threadList = [];
+    this.threadListNextCursor = null;
   }
   status() { return { ready: true, pid: 123, pendingRequests: 0 }; }
   getServerRequests() {
@@ -36,7 +38,10 @@ class FakeBridge extends EventEmitter {
       { name: 'Plan', mode: 'plan', model: null, reasoning_effort: 'medium' },
       { name: 'Default', mode: 'default', model: null, reasoning_effort: null },
     ] };
-    if (method === 'thread/list') return { data: [], nextCursor: null };
+    if (method === 'thread/list') {
+      this.lastThreadListParams = params;
+      return { data: this.threadList, nextCursor: this.threadListNextCursor };
+    }
     if (method === 'thread/start') return { thread: {
       id: this.nextThreadId ?? 'thread-1', cwd: params.cwd, turns: [], preview: '', status: 'idle', updatedAt: 1,
     }, cwd: params.cwd };
@@ -195,11 +200,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   try {
-    const appScript = await fetch(`${base}/app.js?v=81`);
+    const appScript = await fetch(`${base}/app.js?v=102`);
     assert.equal(appScript.status, 200);
     assert.equal(appScript.headers.get('cache-control'), 'no-cache');
     const appShell = await fetch(`${base}/`);
-    assert.equal((await appShell.text()).includes('/app.js?v=81'), true);
+    assert.equal((await appShell.text()).includes('/app.js?v=102'), true);
     const denied = await fetch(`${base}/api/bootstrap`);
     assert.equal(denied.status, 401);
     const pairing = createPairingCode(config);
@@ -226,8 +231,8 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     app.tracker.list = (threadId) => threadId === 'artifact-page-thread'
       ? Array.from({ length: 235 }, (_, index) => ({
         id: `artifact-${index}`,
-        name: index === 205 ? '最终 PRD.md' : `文件-${index}.txt`,
-        relativePath: index === 205 ? 'docs/最终 PRD.md' : `tmp/文件-${index}.txt`,
+        name: index === 205 ? '最终 PRD.md' : index === 234 ? 'implementation.js' : `文件-${index}.txt`,
+        relativePath: index === 205 ? 'docs/最终 PRD.md' : index === 234 ? 'src/implementation.js' : `tmp/文件-${index}.txt`,
       }))
       : originalArtifactList(threadId);
     const artifactPage = await fetch(`${base}/api/threads/artifact-page-thread/artifacts?limit=100&offset=100`, { headers: { Cookie: cookie } });
@@ -235,8 +240,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const artifactPageBody = await artifactPage.json();
     assert.equal(artifactPageBody.data.length, 100);
     assert.equal(artifactPageBody.data[0].id, 'artifact-100');
-    assert.equal(artifactPageBody.total, 235);
+    assert.equal(artifactPageBody.total, 234);
     assert.equal(artifactPageBody.nextOffset, 200);
+    assert.equal(artifactPageBody.data.some((item) => item.name.endsWith('.js')), false);
+    assert.equal(artifactPageBody.scope.kind, 'documents');
+    assert.equal(artifactPageBody.scope.history, true);
     const artifactSearch = await fetch(`${base}/api/threads/artifact-page-thread/artifacts?search=${encodeURIComponent('最终 PRD')}&limit=20`, { headers: { Cookie: cookie } });
     const artifactSearchBody = await artifactSearch.json();
     assert.equal(artifactSearchBody.total, 1);
@@ -404,6 +412,25 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
       mode: 'plan',
       settings: { model: 'pinned-model', reasoning_effort: 'max', developer_instructions: null },
     });
+    bridge.threadList = [{
+      id: 'thread-1', cwd: project, name: '并行测试', preview: '正在规划', status: { type: 'active' }, updatedAt: 3,
+    }];
+    bridge.threadListNextCursor = 'thread-page-2';
+    const threadPage = await fetch(`${base}/api/threads?limit=25`, { headers: { Cookie: cookie } });
+    assert.equal(threadPage.status, 200);
+    const threadPagePayload = await threadPage.json();
+    assert.equal(threadPagePayload.nextCursor, 'thread-page-2');
+    assert.equal(threadPagePayload.data[0].activity.status, 'planning');
+    assert.equal(bridge.lastThreadListParams.limit, 25);
+    assert.equal(bridge.lastThreadListParams.cursor, null);
+    bridge.threadList = [
+      { id: 'thread-1', cwd: project, name: '有效会话', preview: '', status: { type: 'notLoaded' }, updatedAt: 3 },
+      { id: 'thread-missing', cwd: path.join(root, 'deleted-project'), name: '目录已删除', preview: '', status: { type: 'notLoaded' }, updatedAt: 2 },
+    ];
+    bridge.threadListNextCursor = null;
+    const resilientThreadPage = await fetch(`${base}/api/threads?limit=25`, { headers: { Cookie: cookie } });
+    assert.equal(resilientThreadPage.status, 200);
+    assert.deepEqual((await resilientThreadPage.json()).data.map((thread) => thread.id), ['thread-1']);
     const executed = await fetch(`${base}/api/threads/thread-1/turns`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
         cwd: project, text: '按方案实施', mode: 'default', approvalsReviewer: 'auto_review',
@@ -475,6 +502,18 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.deepEqual(bridge.responses[0].result, {
       answers: { mode: { answers: ['分阶段实施'] }, note: { answers: ['补充内容'] } },
     });
+    bridge.emit('notification', {
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: { id: 'turn-4', status: 'completed' } },
+    });
+    const activityRead = await fetch(`${base}/api/threads/thread-1`, { headers: { Cookie: cookie } });
+    assert.equal(activityRead.status, 200);
+    assert.equal((await activityRead.json()).thread.activity.status, 'completed');
+    const markedRead = await fetch(`${base}/api/threads/thread-1/read`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(markedRead.status, 200);
+    assert.equal((await markedRead.json()).activity.status, 'idle');
     bridge.failRollout = 'thread-stale';
     bridge.nextThreadId = 'thread-recreated';
     const recovered = await fetch(`${base}/api/threads/thread-stale/turns`, {

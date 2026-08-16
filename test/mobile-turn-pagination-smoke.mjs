@@ -95,7 +95,6 @@ try {
 
   await page.goto('http://127.0.0.1:39887/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
 
   // 1) 首屏只渲染最新一页（20 回合），且是最新内容

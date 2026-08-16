@@ -22,9 +22,9 @@ try {
   await page.addInitScript((projectPath) => localStorage.setItem('codex-mobile-project', projectPath), project);
   await page.goto(base, { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 30_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
-  await page.locator('button[data-tab="artifacts"]').click();
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadArtifactsAction').click();
   await page.locator('#artifactList .artifact-card').first().waitFor({ timeout: 30_000 });
   const cards = page.locator('#artifactList .artifact-card');
   let selected = null;

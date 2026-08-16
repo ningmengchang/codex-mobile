@@ -4,10 +4,11 @@ export const UI_STATE = {
   draft: 'codex-mobile-draft',
 };
 
-export const DELIVERABLE_KINDS = new Set(['markdown', 'office', 'pdf', 'html']);
-export const DELIVERABLE_KEYWORDS = ['prd', '方案', '需求', '设计', '说明', '报告', 'spec', 'final', '最终', '汇总', 'combined', '清单', '接口'];
-export const ARTIFACT_OTHER_PAGE = 50;
-export const ARTIFACT_OTHER_STEP = 100;
+export const DOCUMENT_KINDS = new Set(['markdown', 'office', 'pdf']);
+export const DOCUMENT_EXTENSIONS = new Set([
+  '.md', '.markdown', '.mdx', '.pdf', '.txt', '.csv', '.tsv', '.rtf',
+  '.doc', '.docx', '.odt', '.xls', '.xlsx', '.ods', '.ppt', '.pptx', '.odp',
+]);
 export const THREAD_CACHE_MAX = 6;
 export const CHUNKED_TURN_THRESHOLD = 12;
 export const CHUNKED_ITEM_THRESHOLD = 80;
@@ -19,6 +20,16 @@ export const state = {
   projectBrowser: null,
   currentProject: localStorage.getItem('codex-mobile-project') || null,
   threads: [],
+  threadsNextCursor: null,
+  threadsLoadingMore: false,
+  threadsScopeLoading: false,
+  threadListScopeKey: null,
+  threadCollections: new Map(),
+  threadSearch: '',
+  threadScope: 'all',
+  threadFavoriteOnly: false,
+  threadFilter: 'all',
+  threadRuntimeById: new Map(),
   favoriteThreads: [],
   currentThread: null,
   turns: [],
@@ -29,13 +40,13 @@ export const state = {
   artifactsTotal: 0,
   artifactsNextOffset: null,
   artifactsLoadingMore: false,
+  artifactsHistoryPending: false,
   artifactSearchResults: null,
   artifactSearchTotal: 0,
   artifactSearchNextOffset: null,
   artifactSearchLoading: false,
   artifactRequestSeq: 0,
   artifactQuery: '',
-  artifactOtherShown: ARTIFACT_OTHER_PAGE,
   artifactsVersion: 0,
   artifactsRenderedVersion: -1,
   artifactsRenderKey: '',
@@ -58,6 +69,7 @@ export const state = {
   threadAction: null,
   events: null,
   mode: localStorage.getItem('codex-mobile-mode') === 'plan' ? 'plan' : 'default',
+  theme: localStorage.getItem('codex-mobile-theme') === 'light' ? 'light' : 'dark',
   approvalsReviewer: (() => {
     const stored = localStorage.getItem('codex-mobile-approvals-reviewer');
     return stored === 'never' || stored === 'user' || stored === 'auto_review' ? stored : 'auto_review';

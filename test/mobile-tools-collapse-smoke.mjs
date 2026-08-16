@@ -83,7 +83,6 @@ try {
 
   await page.goto('http://127.0.0.1:39888/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('.agent-card', { hasText: '这是最终结论' }).waitFor({ timeout: 10_000 });
 

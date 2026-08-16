@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { swipeLeft, swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -85,6 +86,8 @@ try {
 
   await page.goto('http://127.0.0.1:39879/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
+  await page.locator('#mobileThreadList .thread-item').first().click();
+  await page.locator('#chatView.active').waitFor({ timeout: 10_000 });
   await page.waitForTimeout(300);
 
   const layout = await page.evaluate(() => {
@@ -111,7 +114,8 @@ try {
       projectInComposer: Boolean(document.querySelector('#currentProjectName')?.closest('.composer')),
       contextStripPresent: Boolean(document.querySelector('.context-strip')),
       modeSwitchInComposer: Boolean(document.querySelector('#modeSwitch')?.closest('.composer-actions')),
-      settingsInNav: Boolean(document.querySelector('#settingsButton')?.closest('.bottom-nav')),
+      settingsInProjects: Boolean(document.querySelector('#settingsButton')?.closest('#projectsView')),
+      navigationRemoved: !document.querySelector('.bottom-nav'),
       modeBeforeSend: (() => {
         const actions = document.querySelector('.composer-actions');
         const mode = document.querySelector('#modeSwitch');
@@ -140,7 +144,7 @@ try {
   if (!layout.projectInComposer) throw new Error('当前项目名未移入输入区');
   if (layout.contextStripPresent) throw new Error('顶部操作条未移除');
   if (!layout.modeSwitchInComposer) throw new Error('模式切换不在输入区');
-  if (!layout.settingsInNav) throw new Error('设置按钮不在底部导航');
+  if (!layout.settingsInProjects || !layout.navigationRemoved) throw new Error('设置按钮未迁移到文件目录负一屏');
   if (!layout.modeBeforeSend) throw new Error('模式切换未在发送按钮左侧');
   if (layout.previewModifyPadding !== '6px 10px') throw new Error(`产出物弹窗按钮内边距异常：${layout.previewModifyPadding}`);
   if (layout.previewModifyFontSize !== '10px') throw new Error(`产出物弹窗按钮字号异常：${layout.previewModifyFontSize}`);
@@ -153,7 +157,8 @@ try {
   }
   if (layout.scrollWidth > layout.viewportWidth) throw new Error(`页面横向溢出：${layout.scrollWidth} > ${layout.viewportWidth}`);
 
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#chatBackButton').click();
+  await page.locator('#threadsView.active').waitFor({ timeout: 10_000 });
   await page.locator('#mobileThreadList .thread-item').first().waitFor({ timeout: 10_000 });
   const threadsOverflow = await page.evaluate(() => {
     const view = document.querySelector('#threadsView');
@@ -172,21 +177,39 @@ try {
   }
   const threadsHead = await page.evaluate(() => {
     const h2 = document.querySelector('#threadsView .section-head h2');
-    const button = document.querySelector('#mobileNewThreadButton');
+    const button = document.querySelector('#threadsView #mobileNewThreadButton');
     return {
       titlePresent: Boolean(h2),
-      buttonText: button ? button.textContent.trim() : null,
-      buttonLabel: button ? button.getAttribute('aria-label') : null,
-      buttonWidth: button ? Math.round(button.getBoundingClientRect().width) : null,
-      buttonHeight: button ? Math.round(button.getBoundingClientRect().height) : null,
-      buttonRadius: button ? getComputedStyle(button).borderRadius : null,
+      newThreadInHeader: Boolean(button),
     };
   });
-  if (threadsHead.titlePresent) throw new Error(`会话页仍存在标题：${JSON.stringify(threadsHead)}`);
-  if (threadsHead.buttonText !== '+') throw new Error(`新建按钮不是加号：${JSON.stringify(threadsHead)}`);
-  if (threadsHead.buttonLabel !== '新建会话') throw new Error(`新建按钮缺少无障碍标签：${JSON.stringify(threadsHead)}`);
-  if (threadsHead.buttonWidth !== 30 || threadsHead.buttonHeight !== 30) throw new Error(`新建按钮尺寸异常：${JSON.stringify(threadsHead)}`);
-  if (threadsHead.buttonRadius !== '50%') throw new Error(`新建按钮不是圆形：${JSON.stringify(threadsHead)}`);
+  if (!threadsHead.titlePresent || threadsHead.newThreadInHeader) {
+    throw new Error(`会话页标题或新增按钮布局异常：${JSON.stringify(threadsHead)}`);
+  }
+  await swipeRight(page, '#threadsView');
+  await page.locator('#projectsView.active').waitFor({ timeout: 10_000 });
+  const projectActions = await page.evaluate(() => {
+    const create = document.querySelector('#mobileNewThreadButton');
+    const settings = document.querySelector('#settingsButton');
+    const createRect = create.getBoundingClientRect();
+    const settingsRect = settings.getBoundingClientRect();
+    return {
+      createInProjects: Boolean(create.closest('#projectsView')),
+      createWidth: Math.round(createRect.width),
+      createHeight: Math.round(createRect.height),
+      createBottom: Math.round(innerHeight - createRect.bottom),
+      settingsInProjects: Boolean(settings.closest('#projectsView')),
+      settingsWidth: Math.round(settingsRect.width),
+      settingsTop: Math.round(settingsRect.top),
+    };
+  });
+  if (!projectActions.createInProjects || projectActions.createWidth < 52 || projectActions.createHeight < 52
+    || projectActions.createBottom > 22 || !projectActions.settingsInProjects
+    || projectActions.settingsWidth > 32 || projectActions.settingsTop > 54) {
+    throw new Error(`负一屏操作按钮布局异常：${JSON.stringify(projectActions)}`);
+  }
+  await swipeLeft(page, '#projectsView');
+  await page.locator('#threadsView.active').waitFor({ timeout: 10_000 });
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message').first().waitFor({ timeout: 10_000 });

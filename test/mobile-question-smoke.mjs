@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -90,6 +91,10 @@ try {
   });
   await page.goto('http://127.0.0.1:39876/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
+  await swipeRight(page, '#threadsView');
+  await page.locator('#projectsView.active').waitFor({ timeout: 5_000 });
+  await page.locator('#mobileNewThreadButton').click();
+  await page.locator('#chatView.active').waitFor({ timeout: 5_000 });
   await page.locator('#skillButton').click();
   await page.locator('#skillSheet[open]').waitFor({ timeout: 5_000 });
   await page.evaluate(() => window.__emitApproval());
@@ -101,18 +106,20 @@ try {
   const layout = await page.evaluate(() => {
     const stack = document.querySelector('#approvalStack').getBoundingClientRect();
     const composer = document.querySelector('#composer').getBoundingClientRect();
-    const nav = document.querySelector('.bottom-nav');
     const settingsElement = document.querySelector('.context-settings');
+    const settingsButton = document.querySelector('#settingsButton');
     return {
       stackTop: Math.round(stack.top),
       stackBottom: Math.round(stack.bottom),
       stackHeight: Math.round(stack.height),
       composerTop: Math.round(composer.top),
-      navHidden: getComputedStyle(nav).display === 'none',
+      navigationRemoved: !document.querySelector('.bottom-nav'),
       viewport: window.innerHeight,
       approvalOpen: document.body.classList.contains('approval-open'),
       settingsVisible: settingsElement ? getComputedStyle(settingsElement).display !== 'none' : false,
-      settingsGear: Boolean(document.querySelector('#settingsButton')),
+      settingsGear: Boolean(settingsButton),
+      settingsInProjects: Boolean(settingsButton?.closest('#projectsView')),
+      settingsButtonVisible: Boolean(settingsButton?.getClientRects().length),
     };
   });
   const result = {
@@ -147,12 +154,10 @@ try {
   if (!result.layout.approvalOpen) throw new Error('approval-open 状态未设置');
   if (result.layout.settingsVisible) throw new Error('顶部设置项仍然常驻');
   if (!result.layout.settingsGear) throw new Error('缺少设置按钮');
-  await page.locator('#settingsButton').click();
-  await page.locator('#settingsSheet[open]').waitFor({ timeout: 5_000 });
-  if (await page.locator('#modelSelect').isHidden()) throw new Error('设置抽屉里没有模型选择');
-  await page.locator('#closeSettingsButton').click();
-  await page.waitForFunction(() => !document.querySelector('#settingsSheet')?.hasAttribute('open'));
-  if (!result.layout.navHidden) throw new Error('抽屉打开时底部导航未隐藏');
+  if (!result.layout.settingsInProjects || result.layout.settingsButtonVisible) {
+    throw new Error(`设置按钮没有仅放在文件目录负一屏：${JSON.stringify(result.layout)}`);
+  }
+  if (!result.layout.navigationRemoved) throw new Error('审批页仍存在底部导航');
   const answers = respondBody?.answers ?? {};
   if (answers.mode?.[0] !== '分阶段实施' || answers.note?.[0] !== '补充内容') {
     throw new Error(`回答映射异常：${JSON.stringify(respondBody)}`);

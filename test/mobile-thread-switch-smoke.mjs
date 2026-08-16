@@ -63,6 +63,15 @@ const longArtifacts = [
   },
 ];
 
+const shortArtifacts = [
+  {
+    id: 'short-doc-1', threadId: 'thread-short', turnId: 'short-turn-1', projectPath: '/proj/short',
+    status: 'added', capturedAt: '2026-08-07T01:45:10.991Z', modifiedAt: '2026-08-07T09:30:00.000Z',
+    name: 'short-only.md', relativePath: 'docs/short-only.md', fileKind: 'markdown', size: 10,
+    available: true, token: 'tok-short-doc',
+  },
+];
+
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({
@@ -89,6 +98,7 @@ try {
   }, bootstrap);
   const page = await context.newPage();
   let longGetCount = 0;
+  let shortArtifactCount = 0;
   await page.route('**/*', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const fulfillJson = (body, status = 200) => route.fulfill({
@@ -117,8 +127,12 @@ try {
     if (pathname === '/api/threads/thread-long/resume') {
       return fulfillJson({ thread: { ...shortThread, id: 'thread-long', cwd: '/proj/long', name: '长会话', updatedAt: 2, turns: makeLongTurns(true) } });
     }
-    if (pathname === '/api/threads/thread-short/artifacts') return fulfillJson({ data: [] });
-    if (pathname === '/api/threads/thread-long/artifacts') return fulfillJson({ data: longArtifacts });
+    if (pathname === '/api/threads/thread-short/artifacts') {
+      shortArtifactCount += 1;
+      if (shortArtifactCount > 1) await new Promise((resolve) => setTimeout(resolve, 700));
+      return fulfillJson({ data: shortArtifacts, total: 1, nextOffset: null });
+    }
+    if (pathname === '/api/threads/thread-long/artifacts') return fulfillJson({ data: longArtifacts, total: 1, nextOffset: null });
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
@@ -131,7 +145,7 @@ try {
 
   await page.goto('http://127.0.0.1:39886/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#threadsView.active').waitFor({ timeout: 10_000 });
 
   // 1) 首次打开长会话：显示居中加载层，完成后全部回合渲染
   await page.locator('#mobileThreadList .thread-item', { hasText: '长会话' }).click();
@@ -144,12 +158,12 @@ try {
   if (sendDisabled) throw new Error('加载完成后发送按钮仍被禁用');
 
   // 2) 切到短会话
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#chatBackButton').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '短会话' }).click();
   await page.waitForFunction(() => document.querySelector('#timeline')?.textContent?.includes('短会话回答2'), null, { timeout: 10_000 });
 
   // 3) 切回长会话：缓存秒开（不等待后台刷新），加载层不出现
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#chatBackButton').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '长会话' }).click();
   const loadingHiddenDuringCacheHit = await page.evaluate(() => document.querySelector('#threadLoading').hidden);
   if (!loadingHiddenDuringCacheHit) throw new Error('缓存命中时不应显示加载层');
@@ -159,14 +173,32 @@ try {
   if (longGetCount !== 2) throw new Error(`后台刷新后 GET 次数异常：${longGetCount}`);
 
   // 4) 快速连续切换，最终停留在最后点击的会话
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#chatBackButton').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '短会话' }).click();
   await page.waitForFunction(() => document.querySelector('#currentProjectName')?.textContent === 'short', null, { timeout: 5000 });
-  await page.locator('button[data-tab="threads"]').click();
+  await page.locator('#chatBackButton').click();
   await page.locator('#mobileThreadList .thread-item', { hasText: '长会话' }).click();
   await page.waitForFunction(() => document.querySelector('#currentProjectName')?.textContent === 'long', null, { timeout: 5000 });
   const finalProject = await page.locator('#currentProjectName').textContent();
   if (finalProject !== 'long') throw new Error(`快速切换后最终会话错误：${finalProject}`);
+
+  // A delayed artifact response from the previous conversation must not replace
+  // the currently selected conversation's output list.
+  await page.waitForTimeout(900);
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadArtifactsAction').click();
+  await page.locator('#artifactsView.active').waitFor({ timeout: 5000 });
+  await page.locator('.artifact-card', { hasText: 'prd.md' }).waitFor({ timeout: 5000 });
+  if (await page.locator('.artifact-card', { hasText: 'short-only.md' }).count()) {
+    throw new Error('切换会话后显示了上一会话的产出物');
+  }
+  const artifactScope = await page.locator('#artifactScope').textContent();
+  const artifactTitle = await page.locator('#artifactDetailName').textContent();
+  if (artifactTitle !== '长会话' || !artifactScope.includes('long')) {
+    throw new Error(`产出物范围提示错误：${artifactScope}`);
+  }
+  await page.locator('#artifactBackButton').click();
+  await page.locator('#chatView.active').waitFor({ timeout: 5000 });
 
   // 5) SSE 产出物仍能局部更新“本次产出”条
   await page.evaluate(() => {
@@ -183,7 +215,7 @@ try {
   await page.locator('.turn-artifact-chip', { hasText: 'new.md' }).waitFor({ timeout: 10_000 });
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-thread-switch.png', fullPage: true });
-  process.stdout.write(`${JSON.stringify({ projectName, sendDisabled, longGetCount, finalProject })}\n`);
+  process.stdout.write(`${JSON.stringify({ projectName, sendDisabled, longGetCount, finalProject, artifactScope })}\n`);
 } finally {
   await browser.close();
 }

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { swipeLeft, swipeRight } from './helpers/mobile-gestures.mjs';
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_PATH
@@ -94,13 +95,16 @@ try {
   if (await page.locator('#effortSelect').inputValue() !== 'max') {
     throw new Error('首次加载未默认选中 Max');
   }
+  await swipeRight(page, '#threadsView');
+  await page.locator('#projectsView.active').waitFor({ timeout: 5_000 });
   await page.locator('#settingsButton').click();
   await page.locator('#settingsSheet[open]').waitFor({ timeout: 5_000 });
   await page.locator('#modelSelect').selectOption('gpt-5.6-terra');
   await page.locator('#effortSelect').selectOption('high');
   await page.locator('#closeSettingsButton').click();
   await page.waitForFunction(() => !document.querySelector('#settingsSheet')?.hasAttribute('open'));
-  await page.locator('button[data-tab="threads"]').click();
+  await swipeLeft(page, '#projectsView');
+  await page.locator('#threadsView.active').waitFor({ timeout: 5_000 });
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message').first().waitFor({ timeout: 10_000 });
@@ -108,7 +112,8 @@ try {
   await page.locator('#promptInput').fill('草稿内容');
   await page.evaluate(() => document.activeElement?.blur());
   await page.waitForFunction(() => !document.body.classList.contains('keyboard-open'));
-  await page.locator('button[data-tab="artifacts"]').click();
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadArtifactsAction').click();
   await page.waitForTimeout(200);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
@@ -120,12 +125,13 @@ try {
     throw new Error('刷新后推理强度未保持 high');
   }
   const afterReload = {
-    tab: await page.locator('.bottom-nav button.active').getAttribute('data-tab'),
+    view: await page.locator('.view.active').getAttribute('data-view'),
+    route: await page.evaluate(() => location.hash),
     draft: await page.locator('#promptInput').inputValue(),
     threadOpened: await page.locator('#emptyState').isHidden(),
   };
 
-  await page.locator('button[data-tab="chat"]').click();
+  await page.locator('#artifactBackButton').click();
   await page.locator('.message').first().waitFor({ timeout: 10_000 });
   await page.locator('#chatView').evaluate((element) => { element.scrollTop = 400; });
   await page.waitForTimeout(300);
@@ -141,7 +147,7 @@ try {
     throw new Error('第二次刷新后推理强度未保持 high');
   }
   const afterScrollReload = {
-    tab: await page.locator('.bottom-nav button.active').getAttribute('data-tab'),
+    tab: await page.locator('.view.active').getAttribute('data-view'),
     draft: await page.locator('#promptInput').inputValue(),
     scrollTop: await page.locator('#chatView').evaluate((element) => element.scrollTop),
     scrollHeight: await page.locator('#chatView').evaluate((element) => element.scrollHeight),
@@ -149,7 +155,7 @@ try {
   };
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-persist.png', fullPage: true });
 
-  if (afterReload.tab !== 'artifacts') throw new Error(`页签未恢复：${afterReload.tab}`);
+  if (afterReload.view !== 'artifacts' || afterReload.route !== '#artifacts/thread-1') throw new Error(`产出物二级页未恢复：${JSON.stringify(afterReload)}`);
   if (afterReload.draft !== '草稿内容') throw new Error(`草稿未恢复：${afterReload.draft}`);
   if (!afterReload.threadOpened) throw new Error('会话未自动打开');
   if (afterScrollReload.tab !== 'chat') throw new Error(`第二页签未恢复：${afterScrollReload.tab}`);

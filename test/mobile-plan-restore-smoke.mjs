@@ -96,7 +96,6 @@ try {
 
   await page.goto('http://127.0.0.1:39881/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.waitForFunction(() => Boolean(document.querySelector('#timeline [data-turn="turn-1"]')), null, { timeout: 15_000 });
 

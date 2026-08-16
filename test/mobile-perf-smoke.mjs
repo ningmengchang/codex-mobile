@@ -40,11 +40,11 @@ for (let index = 0; index < 10; index += 1) {
 }
 for (let index = 0; index < 990; index += 1) {
   artifacts.push({
-    id: `other-${index}`, threadId: 'thread-1', turnId: index % 3 === 0 ? 'turn-2' : 'turn-1',
-    projectPath: '/home/ningmengchang', path: `/home/ningmengchang/assets/file-${index}.png`, status: 'added',
+    id: `office-${index}`, threadId: 'thread-1', turnId: index % 3 === 0 ? 'turn-2' : 'turn-1',
+    projectPath: '/home/ningmengchang', path: `/home/ningmengchang/docs/history-${index}.docx`, status: 'added',
     capturedAt: '2026-08-07T01:45:10.991Z', modifiedAt: '2026-08-07T09:50:00.000Z',
-    name: `file-${index}.png`, relativePath: `assets/file-${index}.png`, fileKind: 'image',
-    size: 100, available: true, token: `tok-other-${index}`,
+    name: `history-${index}.docx`, relativePath: `docs/history-${index}.docx`, fileKind: 'office',
+    size: 100, available: true, token: `tok-office-${index}`,
   });
 }
 
@@ -115,48 +115,48 @@ try {
 
   await page.goto('http://127.0.0.1:39883/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message.user .bubble').first().waitFor({ timeout: 10_000 });
-  await page.locator('.turn-artifacts').waitFor({ timeout: 10_000 });
+  await page.locator('.turn-artifacts').first().waitFor({ timeout: 10_000 });
 
   const messageHandle = await page.locator('#timeline [data-item-id="user-1"]').elementHandle();
 
-  // 1) 产出物首屏只渲染 置顶(0) + 文档(10) + 其他(50)
-  await page.locator('button[data-tab="artifacts"]').click();
+  // 1) 历史文档首屏严格按服务端分页，只渲染 100 张卡片
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadArtifactsAction').click();
   await page.locator('#artifactsView.active').waitFor({ timeout: 10_000 });
   await page.waitForTimeout(150);
   const initialCards = await page.locator('.artifact-card').count();
-  if (initialCards !== 60) throw new Error(`首屏应渲染 60 张卡片，实际 ${initialCards}`);
-  const moreText = await page.locator('[data-action="more"]').textContent();
-  if (!moreText.includes('40')) throw new Error(`显示更多文案错误：${moreText}`);
+  if (initialCards !== 100) throw new Error(`首屏应渲染 100 张文档卡片，实际 ${initialCards}`);
+  if (await page.locator('[data-action="more"]').count()) throw new Error('仍存在旧的本地“显示更多”入口');
   const remoteMoreText = await page.locator('[data-action="load-more"]').textContent();
   if (!remoteMoreText.includes('100/1000')) throw new Error(`分页加载文案错误：${remoteMoreText}`);
   if (artifactRequests[0]?.limit !== 100 || artifactRequests[0]?.offset !== 0) {
     throw new Error(`首屏产出物请求未分页：${JSON.stringify(artifactRequests)}`);
   }
 
-  // 2) 显示更多每次追加 100 条
+  // 2) 每次从服务端追加 100 条历史文档
   const renderMoreStart = Date.now();
-  await page.locator('[data-action="more"]').click();
-  await page.waitForTimeout(150);
+  await page.locator('[data-action="load-more"]').click();
+  await page.waitForFunction(() => document.querySelectorAll('.artifact-card').length === 200);
   const afterMoreCards = await page.locator('.artifact-card').count();
   const moreRenderMs = Date.now() - renderMoreStart;
-  if (afterMoreCards !== 100) throw new Error(`显示更多后应 100 张卡片，实际 ${afterMoreCards}`);
+  if (afterMoreCards !== 200) throw new Error(`加载第二页后应有 200 张卡片，实际 ${afterMoreCards}`);
+  if (artifactRequests.at(-1)?.offset !== 100) throw new Error(`第二页 offset 错误：${JSON.stringify(artifactRequests)}`);
 
   // 3) 继续读取下一页后仍只增量展示，不一次构建全部 1000 张卡片
   await page.locator('[data-action="load-more"]').click();
-  await page.waitForFunction(() => document.querySelectorAll('.artifact-card').length === 160);
+  await page.waitForFunction(() => document.querySelectorAll('.artifact-card').length === 300);
   const afterRemoteMoreCards = await page.locator('.artifact-card').count();
-  if (artifactRequests.at(-1)?.offset !== 100) {
-    throw new Error(`第二页 offset 错误：${JSON.stringify(artifactRequests)}`);
+  if (artifactRequests.at(-1)?.offset !== 200) {
+    throw new Error(`第三页 offset 错误：${JSON.stringify(artifactRequests)}`);
   }
 
   // 4) 切回控制不重建时间线
   const switchToChatMs = await page.evaluate(() => {
     const started = performance.now();
-    document.querySelector('button[data-tab="chat"]').click();
+    document.querySelector('#artifactBackButton').click();
     return performance.now() - started;
   });
   await page.waitForTimeout(50);
@@ -188,15 +188,17 @@ try {
   // 6) 再来回切一次仍是 O(1) 显示切换
   const roundTripMs = await page.evaluate(async () => {
     const started = performance.now();
-    document.querySelector('button[data-tab="artifacts"]').click();
+    document.querySelector('#chatThreadMoreButton').click();
+    document.querySelector('#threadArtifactsAction').click();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    document.querySelector('button[data-tab="chat"]').click();
+    document.querySelector('#artifactBackButton').click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
     return performance.now() - started;
   });
   if (roundTripMs > 300) throw new Error(`来回切换耗时过长：${roundTripMs.toFixed(1)}ms`);
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-perf.png', fullPage: true });
-  process.stdout.write(`${JSON.stringify({ initialCards, moreText, afterMoreCards, afterRemoteMoreCards, artifactRequests, switchToChatMs: +switchToChatMs.toFixed(1), moreRenderMs, roundTripMs: +roundTripMs.toFixed(1) })}\n`);
+  process.stdout.write(`${JSON.stringify({ initialCards, afterMoreCards, afterRemoteMoreCards, artifactRequests, switchToChatMs: +switchToChatMs.toFixed(1), moreRenderMs, roundTripMs: +roundTripMs.toFixed(1) })}\n`);
 } finally {
   await browser.close();
 }

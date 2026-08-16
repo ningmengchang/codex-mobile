@@ -124,10 +124,9 @@ try {
     if (!overlayBlocksInput) throw new Error('产出物加载期间输入框未被遮罩挡住');
     const hiddenDuringLoad = await page.evaluate(() => {
       const composer = getComputedStyle(document.querySelector('#composer')).display;
-      const nav = getComputedStyle(document.querySelector('.bottom-nav')).display;
-      return composer === 'none' && nav === 'none';
+      return composer === 'none' && !document.querySelector('.bottom-nav');
     });
-    if (!hiddenDuringLoad) throw new Error('产出物加载期间输入框/导航未被隐藏');
+    if (!hiddenDuringLoad) throw new Error('产出物加载期间输入框未被隐藏或底部导航仍存在');
     // 渲染完成：遮罩关闭、隐藏类移除、停在最新
     await page.waitForFunction(() => document.querySelector('#threadLoading')?.hidden === true, null, { timeout: 10_000 });
     const revealed = await page.evaluate(() => ({
@@ -137,12 +136,12 @@ try {
       clientHeight: document.querySelector('#chatView').clientHeight,
       inputEnabled: !document.querySelector('#promptInput').readOnly && !document.querySelector('#sendButton').disabled,
       composerDisplay: getComputedStyle(document.querySelector('#composer')).display,
-      navDisplay: getComputedStyle(document.querySelector('.bottom-nav')).display,
+      navigationRemoved: !document.querySelector('.bottom-nav'),
     }));
     if (revealed.hiding) throw new Error(`渲染完成后时间线仍隐藏：${JSON.stringify(revealed)}`);
     if (!revealed.inputEnabled) throw new Error(`加载完成后输入框仍不可用：${JSON.stringify(revealed)}`);
-    if (revealed.composerDisplay === 'none' || revealed.navDisplay === 'none') {
-      throw new Error(`加载完成后输入框/导航未恢复：${JSON.stringify(revealed)}`);
+    if (revealed.composerDisplay === 'none' || !revealed.navigationRemoved) {
+      throw new Error(`加载完成后输入框未恢复或底部导航重新出现：${JSON.stringify(revealed)}`);
     }
     const inputClickable = await page.evaluate(() => {
       const input = document.querySelector('#promptInput');
@@ -192,7 +191,6 @@ try {
 
   await page.goto('http://127.0.0.1:39895/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
   await openAndAssertLoading();
 

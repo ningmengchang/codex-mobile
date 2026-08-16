@@ -1,7 +1,7 @@
 import { $, $$, toast } from './js/dom.js';
 import { api, post } from './js/http.js';
 import { escapeHtml, markdown, formatBytes, formatTime, formatDateTime, escapeAttribute } from './js/format.js';
-import { renderMermaid } from './js/mermaid-renderer.js';
+import { renderMermaid, setMermaidTheme } from './js/mermaid-renderer.js';
 import { initKeyboardInsets } from './js/keyboard.js';
 import { initDingtalk, initFileShare, loadDingtalkMessages, openFileShare, startDingtalkPolling, stopDingtalkPolling } from './js/dingtalk.js';
 import { initSkillMarket } from './js/skill-market.js';
@@ -9,10 +9,6 @@ import { debug } from './js/debug.js';
 import {
   state,
   UI_STATE,
-  DELIVERABLE_KINDS,
-  DELIVERABLE_KEYWORDS,
-  ARTIFACT_OTHER_PAGE,
-  ARTIFACT_OTHER_STEP,
 } from './js/state.js';
 import {
   fetchTurnPage,
@@ -24,7 +20,7 @@ import {
   ensureTurn,
   upsertItem,
   cacheThread,
-  isDeliverableArtifact,
+  isDocumentArtifact,
   artifactSortTime,
   buildTurnArtifactIndex,
   turnArtifactsHtml,
@@ -55,6 +51,20 @@ import {
 } from './js/chat-view.js';
 
 let skillsCache = null;
+
+function applyTheme(theme, options = {}) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  state.theme = next;
+  document.documentElement.dataset.theme = next;
+  $('#themeColorMeta').content = next === 'light' ? '#f3f5f7' : '#101318';
+  $('#themeSelect').value = next;
+  setMermaidTheme(next);
+  if (options.persist) localStorage.setItem('codex-mobile-theme', next);
+  if (options.rerender && state.currentThread) {
+    state.timelineRenderedVersion = -1;
+    renderTimeline(false);
+  }
+}
 
 async function copyText(text) {
   try {
@@ -192,9 +202,39 @@ function toggleFullscreen() {
 
 let uiStateTimer = null;
 
+function isCompactNavigation() {
+  return window.matchMedia?.('(max-width: 780px)')?.matches === true;
+}
+
+function navigationRoute() {
+  const hash = window.location.hash.replace(/^#/, '');
+  for (const view of ['chat', 'artifacts']) {
+    const prefix = `${view}/`;
+    if (!hash.startsWith(prefix)) continue;
+    try { return { view, threadId: decodeURIComponent(hash.slice(prefix.length)) }; } catch { return { view: 'threads' }; }
+  }
+  if (['threads', 'favorites', 'artifacts', 'projects', 'chat'].includes(hash)) return { view: hash };
+  return null;
+}
+
+function navigationHash(view, threadId = state.currentThread?.id) {
+  return ['chat', 'artifacts'].includes(view) && threadId
+    ? `#${view}/${encodeURIComponent(threadId)}`
+    : `#${view}`;
+}
+
+function updateNavigationHistory(view, mode = 'none', threadId = state.currentThread?.id) {
+  if (!isCompactNavigation() || mode === 'none') return;
+  const contextual = ['chat', 'artifacts'].includes(view);
+  const nextState = { codexMobile: true, view, threadId: contextual ? threadId ?? null : null };
+  const hash = navigationHash(view, threadId);
+  if (mode === 'replace') history.replaceState(nextState, '', hash);
+  else if (window.location.hash !== hash) history.pushState(nextState, '', hash);
+}
+
 function saveUiState() {
   if (state.currentThread?.id) localStorage.setItem(UI_STATE.thread, state.currentThread.id);
-  const activeTab = document.querySelector('.bottom-nav button.active')?.dataset.tab;
+  const activeTab = document.querySelector('.view.active')?.dataset.view;
   if (activeTab) sessionStorage.setItem(UI_STATE.tab, activeTab);
   sessionStorage.setItem(UI_STATE.draft, $('#promptInput').value);
 }
@@ -208,9 +248,31 @@ async function restoreUiState() {
   const savedThreadId = localStorage.getItem(UI_STATE.thread);
   const savedTab = sessionStorage.getItem(UI_STATE.tab);
   const savedDraft = sessionStorage.getItem(UI_STATE.draft) ?? '';
+  const route = navigationRoute();
+  if (isCompactNavigation()) {
+    if (route?.view === 'chat' && route.threadId) {
+      showTab('threads', { history: 'replace' });
+      await openThread(route.threadId, { history: 'push' });
+    } else if (route?.view === 'artifacts' && route.threadId) {
+      const opened = await openThread(route.threadId, { history: 'none' });
+      if (opened) showTab('artifacts', { history: 'none', threadId: route.threadId });
+      else showTab('threads', { history: 'replace' });
+    } else if (route?.view === 'favorites' || (!route && savedTab === 'favorites')) {
+      state.threadFavoriteOnly = true;
+      showTab('threads', { history: 'replace' });
+    } else {
+      showTab('threads', { history: 'replace' });
+    }
+    if (savedDraft && state.currentThread?.id === savedThreadId) {
+      $('#promptInput').value = savedDraft;
+      resizeComposer();
+    }
+    saveUiState();
+    return;
+  }
   if (savedThreadId) {
     try {
-      const opened = await openThread(savedThreadId);
+      const opened = await openThread(savedThreadId, { history: 'none' });
       if (!opened) throw new Error('保存的会话无法恢复');
     } catch {
       localStorage.removeItem(UI_STATE.thread);
@@ -218,7 +280,7 @@ async function restoreUiState() {
     }
   }
   const activeView = document.querySelector('.view.active')?.dataset.view;
-  if (['chat', 'threads', 'artifacts', 'projects', 'favorites'].includes(savedTab) && savedTab !== activeView) {
+  if (['chat', 'threads', 'projects', 'favorites'].includes(savedTab) && savedTab !== activeView) {
     showTab(savedTab);
   }
   const input = $('#promptInput');
@@ -230,6 +292,7 @@ async function restoreUiState() {
 }
 
 async function initialize() {
+  applyTheme(state.theme);
   const auth = await api('/api/auth/status');
   if (!auth.authenticated) {
     showLogin();
@@ -256,6 +319,7 @@ async function loadBootstrap() {
   $('#settingsRuntime').textContent = runtimeParts.join(' · ');
   setConnection(state.bootstrap.appServer.ready ? 'online' : 'connecting', state.bootstrap.appServer.ready ? '已连接' : 'Codex 启动中');
   for (const request of state.bootstrap.pendingRequests ?? []) state.approvals.set(request.id, request);
+  for (const activity of state.bootstrap.threadActivities ?? []) applyThreadActivity(activity, { render: false });
   renderApprovals();
   renderModels();
   renderModeControls();
@@ -332,41 +396,51 @@ function setMode(mode) {
   return true;
 }
 
+function setCurrentProjectDirectory(projectPath, options = {}) {
+  if (!projectPath) return false;
+  const changed = state.currentProject !== projectPath;
+  state.currentProject = projectPath;
+  localStorage.setItem('codex-mobile-project', projectPath);
+  $('#currentProjectName').textContent = projectPath.split('/').filter(Boolean).at(-1) || projectPath;
+  if (options.clearConversation && state.currentThread?.cwd !== projectPath) {
+    state.currentThread = null;
+    state.turns = [];
+    state.turnsNextCursor = null;
+    state.activeTurnId = null;
+    state.pendingTurnMode = null;
+    state.turnModes.clear();
+    state.questionCursor = 0;
+    state.selectedMentions = [];
+    state.currentArtifact = null;
+    localStorage.removeItem(UI_STATE.thread);
+    clearArtifactState();
+    state.timelineVersion += 1;
+    renderMentions();
+    renderArtifacts();
+    renderTimeline();
+    renderChatHeader();
+    updateScrollLatestButton();
+    updateLoadOlderButton();
+  }
+  return changed;
+}
+
 async function selectProject(projectPath, userInitiated = true) {
   try {
-    state.currentProject = projectPath;
-    localStorage.setItem('codex-mobile-project', projectPath);
-    $('#currentProjectName').textContent = projectPath.split('/').filter(Boolean).at(-1) || projectPath;
-    if (userInitiated) {
-      state.currentThread = null;
-      state.turns = [];
-      state.turnsNextCursor = null;
-      state.activeTurnId = null;
-      state.pendingTurnMode = null;
-      state.turnModes.clear();
-      state.questionCursor = 0;
-      state.selectedMentions = [];
-      state.currentArtifact = null;
-      localStorage.removeItem(UI_STATE.thread);
-      clearArtifactState();
-      state.timelineVersion += 1;
-      renderMentions();
-      renderArtifacts();
-      renderTimeline();
-      updateScrollLatestButton();
-      updateLoadOlderButton();
-    }
+    setCurrentProjectDirectory(projectPath, { clearConversation: userInitiated });
     await loadThreads();
     if (userInitiated) {
       if (state.pendingCodexMessage) {
         const draft = state.pendingCodexMessage;
         state.pendingCodexMessage = null;
-        showTab('chat');
+        if (!state.currentThread) await newThread();
+        if (!state.currentThread) return;
+        showTab('chat', { history: 'push', threadId: state.currentThread.id });
         $('#promptInput').value = draft;
         resizeComposer();
         $('#promptInput').focus();
       } else {
-        showTab('threads');
+        showTab('threads', { history: 'push' });
       }
     }
   } catch (error) {
@@ -380,9 +454,15 @@ let projectBrowseSeq = 0;
 async function browseProjects(projectPath = '') {
   const seq = ++projectBrowseSeq;
   const query = projectPath ? `?path=${encodeURIComponent(projectPath)}` : '';
-  const data = await api(`/api/projects${query}`);
-  if (seq !== projectBrowseSeq) return;
-  renderProjects(data);
+  const newThreadButton = $('#mobileNewThreadButton');
+  newThreadButton.disabled = true;
+  try {
+    const data = await api(`/api/projects${query}`);
+    if (seq !== projectBrowseSeq) return;
+    renderProjects(data);
+  } finally {
+    if (seq === projectBrowseSeq) newThreadButton.disabled = false;
+  }
 }
 
 function defaultFileBrowserPath() {
@@ -406,17 +486,13 @@ function openDefaultFileBrowser() {
 
 function renderProjects(data) {
   state.projectBrowser = data;
+  setCurrentProjectDirectory(data.current.path, { clearConversation: true });
   $('#projectPath').textContent = data.current.path;
+  $('#projectPath').setAttribute('aria-label', `管理当前目录 ${data.current.path}`);
+  $('#projectPath').title = '点击或长按管理当前目录';
   $('#projectUpButton').hidden = !data.parent;
   const list = $('#projectList');
   list.replaceChildren();
-  const choose = document.createElement('button');
-  choose.className = 'project-button';
-  choose.innerHTML = `<i>✓</i><span><strong>使用当前目录</strong><small>${escapeHtml(data.current.name)}</small></span><b>›</b>`;
-  choose.setAttribute('aria-label', `使用当前目录 ${data.current.name}，长按管理目录`);
-  bindLongPress(choose, () => showFileActions({ ...data.current, isDirectory: true, isCurrent: true }, choose));
-  choose.addEventListener('click', () => selectProject(data.current.path));
-  list.append(choose);
   for (const entry of data.entries) {
     const isDirectory = entry.isDirectory !== false;
     const button = document.createElement('button');
@@ -447,6 +523,7 @@ function renderProjects(data) {
       list.append(row);
     }
   }
+  if (!data.entries.length) list.innerHTML = '<div class="empty-list">当前目录为空</div>';
   if (data.truncated) {
     const notice = document.createElement('div');
     notice.className = 'project-truncated';
@@ -539,7 +616,6 @@ let fileActionSource = null;
 
 function hideFileUploadPopover() {
   $('#fileUploadPopover').hidden = true;
-  $('#fileDirectoryButton').setAttribute('aria-expanded', 'false');
   if (fileActionSource) {
     fileActionSource.classList.remove('context-active');
     fileActionSource.setAttribute('aria-expanded', 'false');
@@ -567,17 +643,7 @@ function showFileActions(target, source = null, anchor = 'entry') {
     source.classList.add('context-active');
     source.setAttribute('aria-expanded', 'true');
   }
-  $('#fileDirectoryButton').setAttribute('aria-expanded', anchor === 'nav' ? 'true' : 'false');
   navigator.vibrate?.(12);
-}
-
-function showCurrentDirectoryActions() {
-  const alreadyBrowsingFiles = $('#projectsView').classList.contains('active');
-  const directory = alreadyBrowsingFiles
-    ? (state.projectBrowser?.current?.path ?? defaultFileBrowserPath())
-    : defaultFileBrowserPath();
-  showTab('projects');
-  showFileActions({ name: directory.split('/').filter(Boolean).at(-1) || directory, path: directory, isDirectory: true, isCurrent: true }, null, 'nav');
 }
 
 function bindLongPress(element, callback) {
@@ -616,6 +682,140 @@ function bindLongPress(element, callback) {
     event.preventDefault();
     event.stopImmediatePropagation();
     suppressClick = false;
+  });
+}
+
+const SCREEN_SWIPE_AXIS_LOCK = 10;
+
+function bindScreenSwipe(element, handlers) {
+  let gesture = null;
+  let suppressClickUntil = 0;
+  let settleTimer = null;
+  const findTouch = (touches, identifier) => {
+    for (let index = 0; index < touches.length; index += 1) {
+      if (touches[index].identifier === identifier) return touches[index];
+    }
+    return null;
+  };
+  const clearVisual = () => {
+    clearTimeout(settleTimer);
+    element.style.removeProperty('transition');
+    element.style.removeProperty('transform');
+    element.classList.remove('screen-swipe-active');
+  };
+  const settleVisual = () => {
+    clearTimeout(settleTimer);
+    element.style.transition = 'transform .16s ease-out';
+    element.style.transform = 'translate3d(0, 0, 0)';
+    settleTimer = setTimeout(clearVisual, 180);
+  };
+  const reset = (settle = false) => {
+    gesture = null;
+    if (settle) settleVisual();
+    else clearVisual();
+  };
+  element.addEventListener('touchstart', (event) => {
+    if (!isCompactNavigation() || !element.classList.contains('active')) return;
+    if (event.touches.length !== 1) return;
+    if (event.target.closest('input, textarea, select, [contenteditable="true"], .thread-filters, dialog')) return;
+    const touch = event.touches[0];
+    gesture = {
+      identifier: touch.identifier,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      x: touch.clientX,
+      y: touch.clientY,
+      axis: null,
+    };
+    clearVisual();
+  }, { passive: true, capture: true });
+  element.addEventListener('touchmove', (event) => {
+    if (!gesture) return;
+    const touch = findTouch(event.touches, gesture.identifier);
+    if (!touch) return;
+    gesture.x = touch.clientX;
+    gesture.y = touch.clientY;
+    const dx = gesture.x - gesture.startX;
+    const dy = gesture.y - gesture.startY;
+    if (!gesture.axis) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < SCREEN_SWIPE_AXIS_LOCK) return;
+      gesture.axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'horizontal' : 'vertical';
+      if (gesture.axis === 'vertical') {
+        reset(false);
+        return;
+      }
+    }
+    event.preventDefault();
+    const attemptedDirection = dx < 0 ? 'left' : 'right';
+    const directionSign = attemptedDirection === 'left' ? -1 : 1;
+    const enabled = typeof handlers[attemptedDirection] === 'function';
+    const offset = directionSign * Math.min(enabled ? 72 : 14, Math.abs(dx) * (enabled ? .42 : .12));
+    element.classList.add('screen-swipe-active');
+    element.style.transition = 'none';
+    element.style.transform = `translate3d(${offset}px, 0, 0)`;
+  }, { passive: false, capture: true });
+  element.addEventListener('touchend', (event) => {
+    if (!gesture) return;
+    const touch = findTouch(event.changedTouches, gesture.identifier);
+    if (touch) {
+      gesture.x = touch.clientX;
+      gesture.y = touch.clientY;
+    }
+    const dx = gesture.x - gesture.startX;
+    const dy = gesture.y - gesture.startY;
+    const threshold = Math.min(96, Math.max(64, element.clientWidth * .18));
+    const completedDirection = dx < 0 ? 'left' : 'right';
+    const callback = handlers[completedDirection];
+    const completed = gesture.axis === 'horizontal' && typeof callback === 'function'
+      && Math.abs(dx) >= threshold && Math.abs(dx) > Math.abs(dy) * 1.2;
+    gesture = null;
+    if (!completed) {
+      settleVisual();
+      return;
+    }
+    suppressClickUntil = Date.now() + 140;
+    navigator.vibrate?.(8);
+    element.style.transition = 'transform .08s ease-out';
+    element.style.transform = `translate3d(${completedDirection === 'left' ? -72 : 72}px, 0, 0)`;
+    settleTimer = setTimeout(() => {
+      clearVisual();
+      callback();
+    }, 70);
+  }, { capture: true });
+  element.addEventListener('touchcancel', () => reset(true), { capture: true });
+  element.addEventListener('click', (event) => {
+    if (Date.now() > suppressClickUntil) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+}
+
+function cycleThreadGestureFilter() {
+  if (state.threadScope === 'all' && !state.threadFavoriteOnly && state.currentProject) {
+    state.threadScope = 'directory';
+    loadThreads().catch((error) => toast(error.message, 'error'));
+    return;
+  }
+  if (!state.threadFavoriteOnly) {
+    const scopeChanged = state.threadScope !== 'all';
+    state.threadScope = 'all';
+    state.threadFavoriteOnly = true;
+    if (scopeChanged) loadThreads().catch((error) => toast(error.message, 'error'));
+    else renderThreads();
+    return;
+  }
+  state.threadScope = 'all';
+  state.threadFavoriteOnly = false;
+  renderThreads();
+}
+
+function initNegativeScreenGestures() {
+  bindScreenSwipe($('#threadsView'), {
+    left: cycleThreadGestureFilter,
+    right: () => showTab('projects', { history: 'push' }),
+  });
+  bindScreenSwipe($('#projectsView'), {
+    left: () => backFromProjects({ gesture: true }),
   });
 }
 
@@ -724,11 +924,187 @@ async function confirmProjectDelete() {
   }
 }
 
-async function loadThreads() {
-  if (!state.currentProject) return;
-  const result = await api(`/api/threads?cwd=${encodeURIComponent(state.currentProject)}`);
-  state.threads = result.data ?? [];
+const THREAD_STATUS_LABELS = {
+  waiting: '待处理',
+  planning: '规划中',
+  running: '执行中',
+  completed: '已完成',
+  failed: '失败',
+  interrupted: '已停止',
+  idle: '',
+};
+
+let threadListRequestSeq = 0;
+
+function threadCollectionScope() {
+  const directoryScoped = !isCompactNavigation() || state.threadScope === 'directory';
+  if (!directoryScoped) return { key: 'all', cwd: null };
+  const cwd = state.currentProject || null;
+  return { key: cwd ? `cwd:${cwd}` : 'cwd:', cwd };
+}
+
+function currentDirectoryName() {
+  const path = state.currentProject ?? '';
+  return path.split('/').filter(Boolean).at(-1) || path || '当前目录';
+}
+
+function updateThreadFilterControls() {
+  const directoryButton = $('#currentDirectoryThreadFilter');
+  if (directoryButton) {
+    const path = state.currentProject ?? '';
+    directoryButton.textContent = path ? `当前 · ${currentDirectoryName()}` : '当前目录';
+    directoryButton.title = path ? `只看目录：${path}` : '请先在文件目录中选择目录';
+    directoryButton.setAttribute('aria-label', directoryButton.title);
+    directoryButton.disabled = !path;
+  }
+  $$('#threadFilters [data-thread-scope]').forEach((button) => {
+    const active = button.dataset.threadScope === state.threadScope;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const favoriteButton = $('#threadFavoriteToggle');
+  if (favoriteButton) {
+    favoriteButton.classList.toggle('active', state.threadFavoriteOnly);
+    favoriteButton.setAttribute('aria-pressed', String(state.threadFavoriteOnly));
+  }
+  $$('#threadFilters [data-thread-filter]').forEach((button) => {
+    const active = button.dataset.threadFilter === state.threadFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function activateThreadCollection(scope) {
+  const cached = state.threadCollections.get(scope.key);
+  state.threadListScopeKey = scope.key;
+  state.threads = cached ? [...cached.threads] : [];
+  state.threadsNextCursor = cached?.nextCursor ?? null;
+  state.threadsLoadingMore = false;
+  state.threadsScopeLoading = !cached;
   renderThreads();
+}
+
+function rememberThreadCollection(scopeKey) {
+  state.threadCollections.set(scopeKey, {
+    threads: [...state.threads],
+    nextCursor: state.threadsNextCursor,
+  });
+}
+
+function patchThreadCollections(threadId, patch) {
+  for (const collection of state.threadCollections.values()) {
+    const index = collection.threads.findIndex((thread) => thread.id === threadId);
+    if (index >= 0) collection.threads[index] = { ...collection.threads[index], ...patch };
+  }
+}
+
+function removeThreadFromCollections(threadId) {
+  for (const collection of state.threadCollections.values()) {
+    collection.threads = collection.threads.filter((thread) => thread.id !== threadId);
+  }
+}
+
+function inferredThreadActivity(thread) {
+  const raw = String(threadStatusType(thread) ?? '').toLowerCase().replaceAll('_', '');
+  const running = ['active', 'running', 'inprogress', 'busy', 'working'].some((value) => raw.includes(value));
+  return {
+    threadId: thread.id,
+    status: running ? 'running' : 'idle',
+    phase: null,
+    activeTurnId: null,
+    attentionCount: 0,
+    unreadCount: 0,
+    completedAt: null,
+    updatedAt: thread.updatedAt ?? null,
+  };
+}
+
+function threadActivity(thread) {
+  if (!thread?.id) return inferredThreadActivity({ id: '', status: 'idle' });
+  return state.threadRuntimeById.get(thread.id) ?? thread.activity ?? inferredThreadActivity(thread);
+}
+
+function applyThreadActivity(activity, options = {}) {
+  if (!activity?.threadId) return;
+  const previous = state.threadRuntimeById.get(activity.threadId) ?? {};
+  const next = { ...previous, ...activity };
+  state.threadRuntimeById.set(activity.threadId, next);
+  const index = state.threads.findIndex((thread) => thread.id === activity.threadId);
+  if (index >= 0) state.threads[index] = { ...state.threads[index], activity: next };
+  patchThreadCollections(activity.threadId, { activity: next });
+  const cached = state.threadCache.get(activity.threadId);
+  if (cached?.thread) cached.thread = { ...cached.thread, activity: next };
+  if (state.currentThread?.id === activity.threadId) {
+    state.currentThread = { ...state.currentThread, activity: next };
+    if (['completed', 'failed', 'interrupted', 'idle'].includes(next.status)) state.activeTurnId = null;
+    else if (next.activeTurnId) state.activeTurnId = next.activeTurnId;
+    renderChatHeader();
+    renderModeControls();
+    renderPlanDecision();
+  }
+  if (options.render !== false) renderThreads();
+}
+
+function hydrateThreadActivities(threads) {
+  for (const thread of threads) {
+    const activity = thread.activity ?? inferredThreadActivity(thread);
+    state.threadRuntimeById.set(thread.id, activity);
+  }
+}
+
+async function loadThreads(options = {}) {
+  if (!state.currentProject && !isCompactNavigation()) return;
+  const scope = threadCollectionScope();
+  if (!scope.cwd && scope.key !== 'all') {
+    activateThreadCollection(scope);
+    state.threadsScopeLoading = false;
+    renderThreads();
+    return;
+  }
+  const append = options.append === true;
+  if (append && state.threadFavoriteOnly) return;
+  if (append && state.threadListScopeKey !== scope.key) return;
+  if (append && (!state.threadsNextCursor || state.threadsLoadingMore)) return;
+  if (!append && state.threadListScopeKey !== scope.key) activateThreadCollection(scope);
+  const seq = ++threadListRequestSeq;
+  if (append) state.threadsLoadingMore = true;
+  const params = new URLSearchParams({ limit: isCompactNavigation() ? '50' : '100' });
+  if (scope.cwd) params.set('cwd', scope.cwd);
+  if (append && state.threadsNextCursor) params.set('cursor', state.threadsNextCursor);
+  renderThreadLoadMore();
+  try {
+    const result = await api(`/api/threads?${params}`);
+    if (seq !== threadListRequestSeq || scope.key !== threadCollectionScope().key) return;
+    const incoming = result.data ?? [];
+    hydrateThreadActivities(incoming);
+    if (append) {
+      const next = new Map(state.threads.map((thread) => [thread.id, thread]));
+      for (const thread of incoming) next.set(thread.id, thread);
+      state.threads = [...next.values()];
+    } else {
+      state.threads = incoming;
+    }
+    state.threadsNextCursor = result.nextCursor ?? null;
+    state.threadsScopeLoading = false;
+    rememberThreadCollection(scope.key);
+    renderThreads();
+  } finally {
+    if (seq === threadListRequestSeq) {
+      state.threadsLoadingMore = false;
+      if (scope.key === threadCollectionScope().key) state.threadsScopeLoading = false;
+      renderThreads();
+      renderThreadLoadMore();
+    }
+  }
+}
+
+function renderThreadLoadMore() {
+  const button = $('#loadMoreThreadsButton');
+  if (!button) return;
+  button.hidden = state.threadFavoriteOnly || state.threadsScopeLoading
+    || (!state.threadsNextCursor && !state.threadsLoadingMore);
+  button.disabled = state.threadsLoadingMore;
+  button.textContent = state.threadsLoadingMore ? '正在加载…' : '加载更多会话';
 }
 
 const FAVORITES_KEY = 'codex-mobile-favorite-threads';
@@ -769,7 +1145,6 @@ async function loadFavoriteThreads(bootstrapFavorites) {
     localStorage.setItem(FAVORITES_MIGRATION_KEY, '1');
   }
   renderThreads();
-  renderFavorites();
 }
 
 async function upsertFavoriteThread(item) {
@@ -800,55 +1175,79 @@ async function toggleThreadFavorite(thread) {
     toast('已收藏');
   }
   renderThreads();
-  renderFavorites();
 }
 
-async function openFavoriteThread(favorite) {
-  state.currentProject = favorite.cwd || state.currentProject;
-  localStorage.setItem('codex-mobile-project', state.currentProject);
-  $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
-  try {
-    await openThread(favorite.id);
-    await loadThreads();
-  } catch (error) {
-    toast(error.message, 'error');
-  }
+function renderChatHeader() {
+  const header = $('#chatDetailHeader');
+  if (!header) return;
+  const thread = state.currentThread;
+  header.hidden = !thread;
+  if (!thread) return;
+  const activity = threadActivity(thread);
+  $('#chatDetailName').textContent = thread.name || thread.preview || '未命名会话';
+  const parts = [threadProjectName(thread)];
+  const status = THREAD_STATUS_LABELS[activity.status];
+  if (status) parts.push(status);
+  $('#chatDetailMeta').textContent = parts.join(' · ');
 }
 
-function renderFavorites() {
-  const list = $('#favoriteList');
-  if (!list) return;
-  list.replaceChildren();
-  const favorites = favoriteThreads().sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-  if (!favorites.length) {
-    list.innerHTML = '<div class="empty-list">还没有收藏的会话。<br>在会话列表点 ☆ 即可收藏。</div>';
+function backToThreadHome(options = {}) {
+  if (isCompactNavigation() && window.location.hash.startsWith('#chat/')) {
+    history.back();
     return;
   }
-  for (const favorite of favorites) {
-    const item = document.createElement('div');
-    item.className = `thread-item ${state.currentThread?.id === favorite.id ? 'active' : ''}`;
-    const name = favorite.name || '未命名会话';
-    item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(favorite.cwd ?? '')}</small></span><button type="button" class="thread-star on" aria-label="取消收藏" title="取消收藏">★</button>`;
-    item.addEventListener('click', async (event) => {
-      if (event.target.closest('.thread-star')) {
-        try {
-          await removeFavoriteThread(favorite.id);
-          toast('已取消收藏');
-          renderThreads();
-          renderFavorites();
-        } catch (error) {
-          toast(error.message, 'error');
-        }
-        return;
-      }
-      openFavoriteThread(favorite);
-    });
-    list.append(item);
-  }
+  showTab('threads', { history: options.history ?? 'replace' });
 }
 
-function openThreadActionDialog(thread) {
+function openCurrentThreadArtifacts(options = {}) {
+  if (!state.currentThread?.id) {
+    toast('请先打开会话');
+    return;
+  }
+  showTab('artifacts', {
+    history: options.history ?? 'push',
+    threadId: state.currentThread.id,
+  });
+}
+
+function backFromArtifacts() {
+  const contextualRoute = window.location.hash.startsWith('#artifacts/');
+  if (isCompactNavigation() && contextualRoute && history.state?.codexMobile) {
+    history.back();
+    return;
+  }
+  if (state.currentThread?.id) {
+    showTab('chat', { history: 'replace', threadId: state.currentThread.id });
+    return;
+  }
+  showTab('threads', { history: 'replace' });
+}
+
+let projectReturnAnimationTimer = null;
+
+function backFromProjects(options = {}) {
+  hideFileUploadPopover();
+  if (options.gesture) {
+    clearTimeout(projectReturnAnimationTimer);
+    document.body.classList.add('returning-from-projects');
+    projectReturnAnimationTimer = setTimeout(() => {
+      document.body.classList.remove('returning-from-projects');
+      projectReturnAnimationTimer = null;
+    }, 240);
+  }
+  if (isCompactNavigation() && window.location.hash === '#projects' && history.state?.codexMobile) {
+    history.back();
+    return;
+  }
+  showTab('threads', { history: 'replace' });
+}
+
+function openThreadActionDialog(thread, source = 'list') {
   state.threadAction = thread;
+  const fromChat = source === 'chat';
+  $('#threadArtifactsAction').hidden = !fromChat;
+  $('#threadRenameAction').hidden = fromChat;
+  $('#threadDeleteAction').hidden = fromChat;
   $('#threadDeleteConfirm').hidden = true;
   $('#threadDeleteName').textContent = thread.name || thread.preview || '未命名会话';
   $('#threadActionDialog').showModal();
@@ -856,7 +1255,21 @@ function openThreadActionDialog(thread) {
 
 function closeThreadActionDialog() {
   $('#threadActionDialog').close();
+  $('#threadArtifactsAction').hidden = true;
   state.threadAction = null;
+}
+
+function openThreadArtifactsAction() {
+  const thread = state.threadAction;
+  if (!thread || thread.id !== state.currentThread?.id) {
+    closeThreadActionDialog();
+    toast('请先打开对应会话');
+    return;
+  }
+  $('#threadActionDialog').close();
+  $('#threadArtifactsAction').hidden = true;
+  state.threadAction = null;
+  openCurrentThreadArtifacts();
 }
 
 function openThreadRenameDialog() {
@@ -882,11 +1295,12 @@ async function confirmThreadRename() {
     if (state.currentThread?.id === thread.id) state.currentThread.name = name;
     const index = state.threads.findIndex((item) => item.id === thread.id);
     if (index >= 0) state.threads[index] = { ...state.threads[index], name };
+    patchThreadCollections(thread.id, { name });
     setFavoriteThreads(favoriteThreads().map((entry) => entry.id === thread.id ? { ...entry, name, updatedAt: Date.now() } : entry));
     $('#threadRenameDialog').close();
     state.threadAction = null;
     renderThreads();
-    renderFavorites();
+    renderChatHeader();
     toast('已重命名');
   } catch (error) {
     toast(error.message, 'error');
@@ -904,6 +1318,7 @@ async function confirmThreadDeleteOk() {
   try {
     await post(`/api/threads/${encodeURIComponent(thread.id)}/delete`, {});
     state.threads = state.threads.filter((item) => item.id !== thread.id);
+    removeThreadFromCollections(thread.id);
     setFavoriteThreads(favoriteThreads().filter((entry) => entry.id !== thread.id));
     if (state.currentThread?.id === thread.id) {
       state.currentThread = null;
@@ -913,12 +1328,12 @@ async function confirmThreadDeleteOk() {
       state.timelineVersion += 1;
       localStorage.removeItem(UI_STATE.thread);
       renderTimeline();
+      renderChatHeader();
       renderThreads();
-      renderFavorites();
       saveUiState();
+      if (isCompactNavigation()) showTab('threads', { history: 'replace' });
     } else {
       renderThreads();
-      renderFavorites();
     }
     $('#threadActionDialog').close();
     state.threadAction = null;
@@ -928,48 +1343,184 @@ async function confirmThreadDeleteOk() {
   }
 }
 
-function renderThreads() {
-  for (const list of [$('#desktopThreadList'), $('#mobileThreadList')]) {
-    list.replaceChildren();
-    if (!state.threads.length) {
-      list.innerHTML = '<div class="empty-list">这个项目还没有会话</div>';
-      continue;
+function threadStatusPriority(activity) {
+  return { waiting: 0, planning: 1, running: 1, failed: 2, interrupted: 2, completed: 2, idle: 3 }[activity.status] ?? 3;
+}
+
+function favoriteThreadList() {
+  const threadsById = new Map();
+  for (const collection of state.threadCollections.values()) {
+    for (const thread of collection.threads) threadsById.set(thread.id, thread);
+  }
+  for (const thread of state.threads) threadsById.set(thread.id, thread);
+  return favoriteThreads().map((favorite) => {
+    const thread = threadsById.get(favorite.id) ?? {};
+    return {
+      ...favorite,
+      ...thread,
+      name: favorite.name || thread.name,
+      cwd: favorite.cwd || thread.cwd,
+      updatedAt: Math.max(favorite.updatedAt ?? 0, thread.updatedAt ?? 0),
+    };
+  });
+}
+
+function threadMatchesScope(thread) {
+  if (isCompactNavigation() && state.threadScope === 'directory' && thread.cwd !== state.currentProject) return false;
+  return true;
+}
+
+function threadMatchesFilter(thread) {
+  if (!threadMatchesScope(thread)) return false;
+  const activity = threadActivity(thread);
+  if (state.threadFavoriteOnly && !isThreadFavorite(thread.id)) return false;
+  if (state.threadFilter === 'active' && !['planning', 'running'].includes(activity.status)) return false;
+  if (state.threadFilter === 'attention' && activity.status !== 'waiting') return false;
+  if (state.threadFilter === 'unread' && !(activity.unreadCount > 0)) return false;
+  const query = state.threadSearch.trim().toLowerCase();
+  if (!query) return true;
+  return `${thread.name ?? ''} ${thread.preview ?? ''} ${thread.cwd ?? ''}`.toLowerCase().includes(query);
+}
+
+function sortedThreads(threads) {
+  return [...threads].sort((left, right) => {
+    const priority = threadStatusPriority(threadActivity(left)) - threadStatusPriority(threadActivity(right));
+    if (priority !== 0) return priority;
+    return Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0);
+  });
+}
+
+function threadProjectName(thread) {
+  const cwd = thread.cwd ?? '';
+  return cwd.split('/').filter(Boolean).at(-1) || cwd || '未知项目';
+}
+
+function createThreadItem(thread) {
+  const activity = threadActivity(thread);
+  const item = document.createElement('div');
+  item.className = `thread-item thread-state-${activity.status}${state.currentThread?.id === thread.id ? ' active' : ''}`;
+  item.setAttribute('role', 'link');
+  item.tabIndex = 0;
+  const title = thread.name || thread.preview || '未命名会话';
+  const preview = thread.preview && thread.preview !== title ? thread.preview : '打开查看会话内容';
+  const statusLabel = THREAD_STATUS_LABELS[activity.status] ?? '';
+  const starred = isThreadFavorite(thread.id);
+  const unread = activity.unreadCount > 0 ? `<b class="thread-unread" aria-label="${activity.unreadCount} 条未读完成">${activity.unreadCount > 9 ? '9+' : activity.unreadCount}</b>` : '';
+  const status = statusLabel ? `<span class="thread-status" data-status="${escapeAttribute(activity.status)}">${escapeHtml(statusLabel)}</span>` : '';
+  item.innerHTML = `<span class="thread-state-marker" data-status="${escapeAttribute(activity.status)}" aria-hidden="true"></span><span class="thread-main"><span class="thread-title-row"><strong>${escapeHtml(title)}</strong><time>${escapeHtml(formatTime(thread.updatedAt))}</time></span><span class="thread-preview">${escapeHtml(preview)}</span><span class="thread-meta"><span>${escapeHtml(threadProjectName(thread))}</span>${status}${unread}</span></span><span class="thread-row-actions"><button type="button" class="thread-star${starred ? ' on' : ''}" aria-label="${starred ? '取消收藏' : '收藏'}" title="${starred ? '取消收藏' : '收藏'}">${starred ? '★' : '☆'}</button><button type="button" class="thread-more" aria-label="会话操作" title="会话操作">⋯</button></span>`;
+  const activate = (event) => {
+    if (event.target.closest('.thread-star')) {
+      toggleThreadFavorite(thread).catch((error) => toast(error.message, 'error'));
+      return;
     }
-    for (const thread of state.threads) {
-      const item = document.createElement('div');
-      item.className = `thread-item ${state.currentThread?.id === thread.id ? 'active' : ''}`;
-      const title = thread.name || thread.preview || '未命名会话';
-      const status = typeof thread.status === 'string' ? thread.status : Object.keys(thread.status ?? {})[0] ?? '';
-      const starred = isThreadFavorite(thread.id);
-      item.innerHTML = `<span class="thread-main"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(formatTime(thread.updatedAt))} · ${escapeHtml(status)}</small></span><button type="button" class="thread-star${starred ? ' on' : ''}" aria-label="${starred ? '取消收藏' : '收藏'}" title="${starred ? '取消收藏' : '收藏'}">${starred ? '★' : '☆'}</button><button type="button" class="thread-more" aria-label="会话操作" title="会话操作">⋯</button>`;
-      item.addEventListener('click', (event) => {
-        if (event.target.closest('.thread-star')) {
-          toggleThreadFavorite(thread).catch((error) => toast(error.message, 'error'));
-          return;
-        }
-        if (event.target.closest('.thread-more')) {
-          openThreadActionDialog(thread);
-          return;
-        }
-        openThread(thread.id);
-      });
-      list.append(item);
+    if (event.target.closest('.thread-more')) {
+      openThreadActionDialog(thread);
+      return;
     }
+    openThread(thread.id, { history: 'push' });
+  };
+  item.addEventListener('click', activate);
+  item.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    activate(event);
+  });
+  return item;
+}
+
+function appendThreadGroup(list, label, threads) {
+  if (!threads.length) return;
+  const heading = document.createElement('p');
+  heading.className = 'thread-section-label';
+  heading.textContent = label;
+  list.append(heading);
+  for (const thread of threads) list.append(createThreadItem(thread));
+}
+
+function renderThreadSummary() {
+  const filteredFavorites = state.threadFavoriteOnly
+    ? favoriteThreadList().filter(threadMatchesFilter)
+    : null;
+  const activities = state.threads.map((thread) => threadActivity(thread));
+  const active = activities.filter((activity) => ['planning', 'running'].includes(activity.status)).length;
+  const attention = activities.filter((activity) => activity.status === 'waiting').length;
+  const unread = activities.reduce((total, activity) => total + (activity.unreadCount ?? 0), 0);
+  const summary = $('#threadSummary');
+  if (summary) {
+    const parts = [];
+    if (attention) parts.push(`${attention} 个待处理`);
+    if (active) parts.push(`${active} 个进行中`);
+    if (unread) parts.push(`${unread} 个未读`);
+    const directory = state.threadScope === 'directory' ? currentDirectoryName() : '';
+    if (filteredFavorites) summary.textContent = [directory, `${filteredFavorites.length} 个收藏`].filter(Boolean).join(' · ');
+    else if (state.threadsScopeLoading) summary.textContent = directory ? `正在加载 ${directory}…` : '正在加载会话…';
+    else if (parts.length) summary.textContent = [directory, ...parts].filter(Boolean).join(' · ');
+    else summary.textContent = directory ? `${directory} · ${state.threads.length} 个会话` : `${state.threads.length} 个最近会话`;
   }
 }
 
-async function newThread() {
-  if (!state.currentProject) {
-    showTab('projects');
+function renderThreads() {
+  updateThreadFilterControls();
+  renderThreadSummary();
+  const desktop = $('#desktopThreadList');
+  desktop.replaceChildren();
+  if (!state.threads.length) desktop.innerHTML = '<div class="empty-list">这个项目还没有会话</div>';
+  else for (const thread of sortedThreads(state.threads)) desktop.append(createThreadItem(thread));
+
+  const mobile = $('#mobileThreadList');
+  mobile.replaceChildren();
+  if (state.threadsScopeLoading && !state.threadFavoriteOnly) {
+    mobile.innerHTML = '<div class="thread-list-skeleton" role="status" aria-label="正在加载会话"><span class="thread-skeleton-row"></span><span class="thread-skeleton-row"></span><span class="thread-skeleton-row"></span></div>';
+    renderThreadLoadMore();
+    return;
+  }
+  const source = state.threadFavoriteOnly ? favoriteThreadList() : state.threads;
+  const filtered = sortedThreads(source.filter(threadMatchesFilter));
+  if (!filtered.length) {
+    const favoriteEmpty = state.threadFavoriteOnly;
+    const filteredEmpty = state.threadSearch || state.threadFilter !== 'all';
+    const directoryEmpty = state.threadScope === 'directory' && state.currentProject;
+    const scopedFavorites = favoriteEmpty ? source.filter(threadMatchesScope) : [];
+    const message = favoriteEmpty
+      ? !favoriteThreads().length
+        ? '还没有收藏的会话'
+        : !scopedFavorites.length && directoryEmpty
+          ? `${currentDirectoryName()} 目录下没有收藏的会话`
+          : '没有符合条件的收藏'
+      : filteredEmpty
+      ? '没有符合条件的会话'
+      : directoryEmpty
+        ? `${currentDirectoryName()} 目录下暂无会话`
+        : '还没有会话，右滑到文件目录后点击右下角 + 新建';
+    mobile.innerHTML = `<div class="empty-list">${escapeHtml(message)}</div>`;
+    renderThreadLoadMore();
+    return;
+  }
+  const highlighted = filtered.filter((thread) => threadStatusPriority(threadActivity(thread)) < 3);
+  const recent = filtered.filter((thread) => threadStatusPriority(threadActivity(thread)) === 3);
+  appendThreadGroup(mobile, '待处理与进行中', highlighted);
+  const recentLabel = state.threadFavoriteOnly
+    ? (highlighted.length ? '其他收藏' : '收藏会话')
+    : (highlighted.length ? '最近会话' : '全部会话');
+  appendThreadGroup(mobile, recentLabel, recent);
+  renderThreadLoadMore();
+}
+
+async function newThread(options = {}) {
+  const cwd = options.cwd ?? state.currentProject;
+  if (!cwd) {
+    showTab('projects', { history: 'push' });
     toast('请先选择项目');
     return;
   }
+  setCurrentProjectDirectory(cwd, { clearConversation: true });
   try {
     const result = await post('/api/threads', {
-      cwd: state.currentProject,
+      cwd,
       model: effectiveModel() || undefined,
     });
     state.currentThread = result.thread;
+    if (result.thread.activity) applyThreadActivity(result.thread.activity, { render: false });
     state.turns = result.thread.turns ?? [];
     state.turnsNextCursor = null;
     clearArtifactState();
@@ -978,8 +1529,9 @@ async function newThread() {
     state.activeTurnId = null;
     state.turnModes.clear();
     renderTimeline();
+    renderChatHeader();
     await loadThreads();
-    showTab('chat');
+    showTab('chat', { history: 'push', threadId: result.thread.id });
     $('#promptInput').focus();
     saveUiState();
   } catch (error) {
@@ -987,14 +1539,15 @@ async function newThread() {
   }
 }
 
-function setArtifacts(next, options = {}) {
-  if (!sameArtifactSet(state.artifacts, next)) {
-    state.artifacts = next;
+function setArtifacts(next) {
+  const documents = next.filter((artifact) => artifact.available !== false
+    && artifact.status !== 'deleted' && isDocumentArtifact(artifact));
+  if (!sameArtifactSet(state.artifacts, documents)) {
+    state.artifacts = documents;
     state.artifactsVersion += 1;
-    if (options.resetPaging !== false) state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
     return true;
   }
-  state.artifacts = next;
+  state.artifacts = documents;
   return false;
 }
 
@@ -1009,8 +1562,10 @@ function clearArtifactState() {
   state.artifactSearchNextOffset = null;
   state.artifactSearchLoading = false;
   state.artifactsLoadingMore = false;
+  state.artifactsHistoryPending = false;
+  clearTimeout(artifactHistoryRefreshTimer);
+  artifactHistoryRefreshTimer = null;
   state.artifactQuery = '';
-  state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
   state.artifactsRenderedVersion = -1;
   const search = $('#artifactSearch');
   if (search) search.value = '';
@@ -1030,6 +1585,7 @@ function activeTurnFromSnapshot(thread, turns) {
 function applyThreadData(thread, turns, seq = state.threadLoadSeq) {
   if (seq !== state.threadLoadSeq) return false;
   state.currentThread = thread;
+  if (thread.activity) applyThreadActivity(thread.activity, { render: false });
   state.currentProject = thread.cwd;
   localStorage.setItem('codex-mobile-project', state.currentProject);
   $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
@@ -1037,24 +1593,39 @@ function applyThreadData(thread, turns, seq = state.threadLoadSeq) {
   state.timelineVersion += 1;
   state.questionCursor = 0;
   state.turnModes.clear();
-  state.activeTurnId = activeTurnFromSnapshot(thread, turns);
+  state.activeTurnId = threadActivity(thread).activeTurnId ?? activeTurnFromSnapshot(thread, turns);
   state.pinnedToBottom = true;
   updateScrollLatestButton();
   renderTimeline();
+  renderChatHeader();
+  renderApprovals();
+  syncViewChrome('chat');
   renderThreads();
   saveUiState();
   return true;
 }
 
-async function openThread(threadId) {
+async function markThreadRead(threadId) {
+  if (!threadId) return;
+  const activity = state.threadRuntimeById.get(threadId);
+  if (!activity?.unreadCount) return;
+  try {
+    const result = await post(`/api/threads/${encodeURIComponent(threadId)}/read`, {});
+    if (result.activity) applyThreadActivity(result.activity);
+  } catch (error) {
+    debug.log('thread', 'mark-read-failed', { threadId, message: error.message });
+  }
+}
+
+async function openThread(threadId, options = {}) {
   debug.log('thread', 'open-start', { threadId });
   const seq = ++state.threadLoadSeq;
-  showTab('chat');
+  showTab('chat', { history: options.history ?? 'push', threadId });
   const cached = state.threadCache.get(threadId);
   if (cached) {
     clearArtifactState();
     setArtifacts(cached.artifacts ?? []);
-    state.artifactsThreadId = threadId;
+    state.artifactsThreadId = cached.artifactsLoaded === true ? threadId : null;
     state.artifactsTotal = cached.artifactsTotal ?? state.artifacts.length;
     state.artifactsNextOffset = cached.artifactsNextOffset ?? null;
     renderArtifacts();
@@ -1062,8 +1633,17 @@ async function openThread(threadId) {
     applyThreadData(cached.thread, cached.turns, seq);
     state.threadOpenedAt = Date.now();
     updateLoadOlderButton();
+    void markThreadRead(threadId);
     post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
-    refreshCurrentThread({ seq }).catch(() => {});
+    loadArtifacts(threadId).then(() => {
+      const entry = state.threadCache.get(threadId);
+      if (!entry || state.currentThread?.id !== threadId) return;
+      entry.artifacts = state.artifacts.slice();
+      entry.artifactsTotal = state.artifactsTotal;
+      entry.artifactsNextOffset = state.artifactsNextOffset;
+      entry.artifactsLoaded = true;
+    }).catch((error) => toast(error.message, 'error'));
+    refreshCurrentThread({ seq, skipArtifacts: true }).catch(() => {});
     return true;
   }
   showThreadLoading();
@@ -1085,6 +1665,7 @@ async function openThread(threadId) {
       thread: read.thread,
       turns: turns.slice(),
       artifacts: [],
+      artifactsLoaded: false,
       turnsNextCursor: state.turnsNextCursor,
       cachedAt: Date.now(),
     });
@@ -1098,6 +1679,7 @@ async function openThread(threadId) {
         entry.artifacts = state.artifacts.slice();
         entry.artifactsTotal = state.artifactsTotal;
         entry.artifactsNextOffset = state.artifactsNextOffset;
+        entry.artifactsLoaded = true;
       }
     } catch (error) {
       toast(error.message, 'error');
@@ -1105,6 +1687,7 @@ async function openThread(threadId) {
       if (seq === state.threadLoadSeq) {
         hideThreadLoading();
         state.threadOpenedAt = Date.now();
+        void markThreadRead(threadId);
         debug.log('thread', 'open-complete', { threadId });
       }
     }
@@ -1113,6 +1696,7 @@ async function openThread(threadId) {
     if (seq === state.threadLoadSeq) {
       hideThreadLoading();
       toast(error.message, 'error');
+      if (isCompactNavigation()) showTab('threads', { history: 'replace' });
     }
     return false;
   }
@@ -1148,21 +1732,28 @@ async function refreshCurrentThread(options = {}) {
       if (state.currentThread?.id !== threadId) return;
       const incoming = page && page.turnsAsc.length ? page.turnsAsc : fullTurns;
       const merged = mergeTurns(state.turns, incoming, 'refresh');
+      const previousActivity = threadActivity(state.currentThread);
+      const incomingActivity = read.thread.activity ?? inferredThreadActivity(read.thread);
       const metaChanged = state.currentThread.updatedAt !== read.thread.updatedAt
         || state.currentThread.name !== read.thread.name
-        || threadStatusType(state.currentThread) !== threadStatusType(read.thread);
+        || threadStatusType(state.currentThread) !== threadStatusType(read.thread)
+        || previousActivity.status !== incomingActivity.status
+        || previousActivity.unreadCount !== incomingActivity.unreadCount;
       state.currentThread = read.thread;
+      applyThreadActivity(incomingActivity, { render: false });
       state.currentProject = read.thread.cwd;
       localStorage.setItem('codex-mobile-project', state.currentProject);
       $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
       if (merged.changed || metaChanged) {
         state.turns = merged.turns;
-        state.activeTurnId = activeTurnFromSnapshot(read.thread, state.turns);
+        state.activeTurnId = incomingActivity.activeTurnId ?? activeTurnFromSnapshot(read.thread, state.turns);
         if (page && page.turnsAsc.length) state.turnsNextCursor = page.nextCursor;
         state.timelineVersion += 1;
         renderTimeline();
         updateLoadOlderButton();
       }
+      renderChatHeader();
+      renderApprovals();
       renderThreads();
       const entry = state.threadCache.get(threadId);
       if (entry) {
@@ -1171,11 +1762,14 @@ async function refreshCurrentThread(options = {}) {
         entry.turnsNextCursor = state.turnsNextCursor;
         entry.cachedAt = Date.now();
       }
-      await loadArtifacts(threadId);
-      if (entry && state.currentThread?.id === threadId) {
-        entry.artifacts = state.artifacts.slice();
-        entry.artifactsTotal = state.artifactsTotal;
-        entry.artifactsNextOffset = state.artifactsNextOffset;
+      if (!options.skipArtifacts) {
+        await loadArtifacts(threadId);
+        if (entry && state.currentThread?.id === threadId) {
+          entry.artifacts = state.artifacts.slice();
+          entry.artifactsTotal = state.artifactsTotal;
+          entry.artifactsNextOffset = state.artifactsNextOffset;
+          entry.artifactsLoaded = true;
+        }
       }
       saveUiState();
     } finally {
@@ -1229,6 +1823,47 @@ function insertSkill(name) {
   input.focus();
 }
 
+function terminalActivityStatus(value) {
+  const status = String(value ?? '').toLowerCase();
+  if (status.includes('fail') || status.includes('error')) return 'failed';
+  if (status.includes('interrupt') || status.includes('cancel') || status.includes('stop')) return 'interrupted';
+  return 'completed';
+}
+
+function applyCodexRuntimeEvent(method, params, threadId, turnId) {
+  if (!threadId) return;
+  const previous = state.threadRuntimeById.get(threadId) ?? {
+    threadId, status: 'idle', phase: null, activeTurnId: null, unreadCount: 0, attentionCount: 0,
+  };
+  if (method === 'turn/started') {
+    const phase = threadId === state.currentThread?.id && state.pendingTurnMode
+      ? state.pendingTurnMode
+      : previous.phase;
+    applyThreadActivity({
+      ...previous,
+      threadId,
+      status: phase === 'plan' ? 'planning' : 'running',
+      phase: phase === 'plan' ? 'plan' : 'default',
+      activeTurnId: params.turn?.id ?? turnId ?? previous.activeTurnId,
+      updatedAt: Date.now(),
+    });
+  } else if (method === 'turn/completed') {
+    const status = terminalActivityStatus(params.turn?.status ?? params.status);
+    const alreadyTerminal = ['completed', 'failed', 'interrupted'].includes(previous.status)
+      && !previous.activeTurnId;
+    applyThreadActivity({
+      ...previous,
+      threadId,
+      status,
+      phase: null,
+      activeTurnId: null,
+      unreadCount: alreadyTerminal ? (previous.unreadCount ?? 0) : (previous.unreadCount ?? 0) + 1,
+      completedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  }
+}
+
 function handleCodex(message) {
   const { method, params = {} } = message;
   const threadId = params.threadId ?? params.thread_id ?? params.thread?.id;
@@ -1242,7 +1877,8 @@ function handleCodex(message) {
     }
   }
   debug.log('sse', 'process', { method, threadId });
-  if (method === 'thread/started' && params.thread?.cwd === state.currentProject) loadThreads().catch(() => {});
+  applyCodexRuntimeEvent(method, params, threadId, turnId);
+  if (method === 'thread/started' && (isCompactNavigation() || params.thread?.cwd === state.currentProject)) loadThreads().catch(() => {});
   if (!state.currentThread || threadId !== state.currentThread.id) return;
   if (method === 'turn/started') {
     const turn = params.turn ?? { id: turnId, status: 'inProgress', items: [] };
@@ -1317,6 +1953,7 @@ function handleCodex(message) {
     state.timelineVersion += 1;
     renderTimeline();
     renderPlanDecision();
+    void markThreadRead(threadId);
     refreshCurrentThread({ force: true, seq: state.threadLoadSeq }).catch(() => renderTimeline(false, true));
   }
 }
@@ -1336,6 +1973,11 @@ function isQuestionRequest(request) {
 
 function isMcpElicitationRequest(request) {
   return request?.method === 'mcpServer/elicitation/request';
+}
+
+function approvalThreadId(request) {
+  const params = request?.params ?? {};
+  return params.threadId ?? params.thread_id ?? params.thread?.id ?? null;
 }
 
 function questionHtml(question, requestId) {
@@ -1358,12 +2000,18 @@ function questionHtml(question, requestId) {
 function renderApprovals() {
   const stack = $('#approvalStack');
   stack.replaceChildren();
+  const chatActive = document.querySelector('.view.active')?.dataset.view === 'chat';
+  const requests = [...state.approvals.values()].filter((request) => {
+    if (!chatActive || !state.currentThread) return false;
+    const threadId = approvalThreadId(request);
+    return !threadId || threadId === state.currentThread.id;
+  });
   const head = document.createElement('div');
   head.className = 'approval-drawer-head';
   head.innerHTML = '<i></i><strong>Codex 需要你处理</strong>';
   const scroll = document.createElement('div');
   scroll.className = 'approval-drawer-scroll';
-  for (const request of state.approvals.values()) {
+  for (const request of requests) {
     const params = request.params ?? {};
     const card = document.createElement('article');
     card.className = 'approval-card';
@@ -1401,9 +2049,10 @@ function renderApprovals() {
     scroll.append(card);
   }
   stack.append(head, scroll);
-  stack.classList.toggle('visible', state.approvals.size > 0);
-  document.body.classList.toggle('approval-open', state.approvals.size > 0);
-  if (state.approvals.size) {
+  stack.hidden = requests.length === 0;
+  stack.classList.toggle('visible', requests.length > 0);
+  document.body.classList.toggle('approval-open', requests.length > 0);
+  if (requests.length) {
     requestAnimationFrame(() => scroll.querySelector('input, textarea, button')?.focus({ preventScroll: true }));
   }
 }
@@ -1466,11 +2115,37 @@ async function syncPendingRequests() {
 function sameArtifactSet(left, right) {
   if (left.length !== right.length) return false;
   const seen = new Map();
-  for (const item of left) seen.set(item.id, `${item.available ? 1 : 0}:${item.token ? 1 : 0}`);
+  for (const item of left) {
+    seen.set(item.id, `${item.available ? 1 : 0}:${item.token ? 1 : 0}:${item.status ?? ''}:${item.modifiedAt ?? ''}:${item.name ?? ''}`);
+  }
   for (const item of right) {
-    if (seen.get(item.id) !== `${item.available ? 1 : 0}:${item.token ? 1 : 0}`) return false;
+    if (seen.get(item.id) !== `${item.available ? 1 : 0}:${item.token ? 1 : 0}:${item.status ?? ''}:${item.modifiedAt ?? ''}:${item.name ?? ''}`) return false;
   }
   return true;
+}
+
+function artifactPathKey(item) {
+  return `${item.projectPath ?? ''}\0${item.relativePath ?? item.name ?? item.id ?? ''}`;
+}
+
+let artifactHistoryRefreshTimer = null;
+
+function scheduleArtifactHistoryRefresh(threadId, delay = 1200) {
+  clearTimeout(artifactHistoryRefreshTimer);
+  artifactHistoryRefreshTimer = null;
+  if (!state.artifactsHistoryPending || threadId !== state.currentThread?.id) return;
+  artifactHistoryRefreshTimer = setTimeout(async () => {
+    if (threadId !== state.currentThread?.id) return;
+    try {
+      await loadArtifacts(threadId);
+      const query = state.artifactQuery.trim();
+      if (!state.artifactsHistoryPending && query && threadId === state.currentThread?.id) {
+        await loadArtifactSearch(query);
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }, delay);
 }
 
 function mergeArtifactPage(current, incoming) {
@@ -1494,10 +2169,12 @@ async function loadArtifacts(expectedThreadId = state.currentThread?.id, options
     const result = await api(`/api/threads/${encodeURIComponent(expectedThreadId)}/artifacts?${query}`);
     if (expectedThreadId !== state.currentThread?.id || seq !== state.artifactRequestSeq) return;
     const next = result.data ?? [];
-    setArtifacts(append ? mergeArtifactPage(state.artifacts, next) : next, { resetPaging: !append });
+    setArtifacts(append ? mergeArtifactPage(state.artifacts, next) : next);
     state.artifactsThreadId = expectedThreadId;
     state.artifactsTotal = Number.isFinite(result.total) ? result.total : state.artifacts.length;
     state.artifactsNextOffset = Number.isFinite(result.nextOffset) ? result.nextOffset : null;
+    state.artifactsHistoryPending = result.scope?.historyPending === true;
+    scheduleArtifactHistoryRefresh(expectedThreadId);
     refreshTimelineAfterArtifacts();
   } finally {
     if (seq === state.artifactRequestSeq) {
@@ -1534,12 +2211,15 @@ async function loadArtifactSearch(queryText, options = {}) {
     const query = new URLSearchParams({ search: queryTextTrimmed, limit: '100', offset: String(offset ?? 0) });
     const result = await api(`/api/threads/${encodeURIComponent(threadId)}/artifacts?${query}`);
     if (threadId !== state.currentThread?.id || queryTextTrimmed !== state.artifactQuery.trim() || seq !== state.artifactRequestSeq) return;
-    const incoming = result.data ?? [];
+    const incoming = (result.data ?? []).filter((artifact) => artifact.available !== false
+      && artifact.status !== 'deleted' && isDocumentArtifact(artifact));
     state.artifactSearchResults = append
       ? mergeArtifactPage(state.artifactSearchResults ?? [], incoming)
       : incoming;
     state.artifactSearchTotal = Number.isFinite(result.total) ? result.total : state.artifactSearchResults.length;
     state.artifactSearchNextOffset = Number.isFinite(result.nextOffset) ? result.nextOffset : null;
+    state.artifactsHistoryPending = result.scope?.historyPending === true;
+    scheduleArtifactHistoryRefresh(threadId);
   } finally {
     if (seq === state.artifactRequestSeq) {
       state.artifactSearchLoading = false;
@@ -1551,13 +2231,7 @@ async function loadArtifactSearch(queryText, options = {}) {
 }
 
 function rankArtifacts(artifacts) {
-  return artifacts.map((artifact) => ({
-    artifact,
-    deliverable: isDeliverableArtifact(artifact),
-  })).sort((a, b) => {
-    if (a.deliverable !== b.deliverable) return a.deliverable ? -1 : 1;
-    return artifactSortTime(b.artifact) - artifactSortTime(a.artifact);
-  });
+  return [...artifacts].sort((left, right) => artifactSortTime(right) - artifactSortTime(left));
 }
 
 function artifactKindLabel(kind) {
@@ -1581,20 +2255,30 @@ function createArtifactCard(artifact) {
 
 function renderArtifacts() {
   const list = $('#artifactList');
+  const detailName = $('#artifactDetailName');
+  const scope = $('#artifactScope');
+  const thread = state.currentThread;
+  if (detailName) detailName.textContent = thread?.name || thread?.preview || '未命名会话';
+  if (scope) {
+    scope.textContent = thread
+      ? `${state.artifactsHistoryPending ? '历史文档同步中…' : '全部历史文档'} · ${threadProjectName(thread)}`
+      : '请先选择会话';
+  }
   const query = state.artifactQuery.trim().toLowerCase();
-  const renderKey = `${query}|${state.artifactOtherShown}|${state.artifactsNextOffset}|${state.artifactSearchNextOffset}|${state.artifactsLoadingMore}`;
+  const renderKey = `${query}|${state.artifactsNextOffset}|${state.artifactSearchNextOffset}|${state.artifactsLoadingMore}|${state.artifactsHistoryPending}`;
   if (state.artifactsRenderedVersion === state.artifactsVersion && state.artifactsRenderKey === renderKey) return;
   state.artifactsRenderKey = renderKey;
   state.artifactsRenderedVersion = state.artifactsVersion;
   list.replaceChildren();
-  $('#artifactBadge').hidden = !(state.artifactsTotal || state.artifacts.length);
   const items = query ? (state.artifactSearchResults ?? []) : state.artifacts;
   if (!items.length && state.artifactSearchLoading) {
     list.innerHTML = '<div class="empty-list">正在搜索产出物…</div>';
     return;
   }
   if (!items.length && !query) {
-    list.innerHTML = '<div class="empty-list">当前会话还没有可展示的产出物。<br>Codex 修改或生成文件后会自动出现在这里。</div>';
+    list.innerHTML = state.artifactsHistoryPending
+      ? '<div class="empty-list">页面已经可以使用，正在后台补齐历史文档…</div>'
+      : '<div class="empty-list">这个会话的历史记录中还没有可展示的文档。<br>Markdown、Word、Excel、PPT、PDF 和文本文件会出现在这里。</div>';
     return;
   }
   if (!items.length) {
@@ -1602,28 +2286,11 @@ function renderArtifacts() {
     return;
   }
   const ranked = rankArtifacts(items);
-  const groups = [
-    { label: '文档产出', match: (entry) => entry.deliverable },
-    { label: '其他文件', match: (entry) => !entry.deliverable },
-  ];
-  for (const group of groups) {
-    const entries = ranked.filter(group.match);
-    if (!entries.length) continue;
-    const header = document.createElement('div');
-    header.className = 'artifact-section';
-    header.textContent = group.label;
-    list.append(header);
-    const shown = group.label === '其他文件' ? entries.slice(0, state.artifactOtherShown) : entries;
-    for (const entry of shown) list.append(createArtifactCard(entry.artifact));
-    if (entries.length > shown.length) {
-      const more = document.createElement('button');
-      more.type = 'button';
-      more.className = 'artifact-more';
-      more.dataset.action = 'more';
-      more.textContent = `还有 ${entries.length - shown.length} 条 · 显示更多`;
-      list.append(more);
-    }
-  }
+  const header = document.createElement('div');
+  header.className = 'artifact-section';
+  header.textContent = '历史文档';
+  list.append(header);
+  for (const artifact of ranked) list.append(createArtifactCard(artifact));
   const nextOffset = query ? state.artifactSearchNextOffset : state.artifactsNextOffset;
   const total = query ? state.artifactSearchTotal : state.artifactsTotal;
   if (nextOffset != null) {
@@ -1995,7 +2662,7 @@ function modifyCurrentArtifact() {
   if (!state.selectedMentions.includes(artifact.relativePath)) state.selectedMentions.push(artifact.relativePath);
   renderMentions();
   $('#previewDialog').close();
-  showTab('chat');
+  showTab('chat', { history: 'push', threadId: state.currentThread?.id });
   $('#promptInput').value = `请修改 ${artifact.name}：`;
   resizeComposer();
   $('#promptInput').focus();
@@ -2048,10 +2715,21 @@ async function sendPrompt(event) {
       state.pendingTurnMode = state.mode;
       result = await post(`/api/threads/${encodeURIComponent(state.currentThread.id)}/turns`, body);
       if (result.thread) {
-        state.currentThread = result.thread;
+        state.currentThread = { ...state.currentThread, ...result.thread };
+        if (result.thread.activity) applyThreadActivity(result.thread.activity, { render: false });
         state.currentProject = result.thread.cwd;
         localStorage.setItem('codex-mobile-project', state.currentProject);
         $('#currentProjectName').textContent = state.currentProject.split('/').at(-1);
+        const threadIndex = state.threads.findIndex((thread) => thread.id === result.thread.id);
+        const updatedThread = {
+          ...(threadIndex >= 0 ? state.threads[threadIndex] : {}),
+          ...state.currentThread,
+          preview: text,
+          updatedAt: Date.now(),
+        };
+        if (threadIndex >= 0) state.threads[threadIndex] = updatedThread;
+        else state.threads.unshift(updatedThread);
+        renderChatHeader();
         renderThreads();
         if (result.recreated) {
           state.turns = [];
@@ -2072,6 +2750,16 @@ async function sendPrompt(event) {
         state.activeTurnId = null;
       } else {
         state.activeTurnId = result.turn.id;
+      }
+      if (!result.thread?.activity && turn.status !== 'completed') {
+        applyThreadActivity({
+          ...threadActivity(state.currentThread),
+          threadId: state.currentThread.id,
+          status: body.mode === 'plan' ? 'planning' : 'running',
+          phase: body.mode,
+          activeTurnId: result.turn.id,
+          updatedAt: Date.now(),
+        });
       }
       state.turnModes.set(result.turn.id, body.mode);
       if (Array.isArray(result.turn.items)) {
@@ -2123,21 +2811,47 @@ function executePlan() {
 async function interruptTurn() {
   if (!state.currentThread || !state.activeTurnId) return;
   try {
-    await post(`/api/threads/${encodeURIComponent(state.currentThread.id)}/turns/${encodeURIComponent(state.activeTurnId)}/interrupt`);
+    const result = await post(`/api/threads/${encodeURIComponent(state.currentThread.id)}/turns/${encodeURIComponent(state.activeTurnId)}/interrupt`);
+    if (result.activity) applyThreadActivity(result.activity);
     toast('正在停止');
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
-function showTab(name) {
+function syncViewChrome(name = document.querySelector('.view.active')?.dataset.view, threadId = state.currentThread?.id) {
+  const chatDetail = isCompactNavigation() && name === 'chat' && Boolean(threadId);
+  const artifactsDetail = isCompactNavigation() && name === 'artifacts' && Boolean(threadId);
+  const projectDetail = isCompactNavigation() && name === 'projects';
+  document.body.classList.toggle('mobile-chat-detail', chatDetail);
+  document.body.classList.toggle('mobile-artifacts-detail', artifactsDetail);
+  document.body.classList.toggle('mobile-project-detail', projectDetail);
+  document.body.classList.toggle('mobile-thread-home', isCompactNavigation() && name === 'threads');
+  renderChatHeader();
+  renderApprovals();
+}
+
+function showTab(name, options = {}) {
+  if (name === 'favorites') {
+    state.threadFavoriteOnly = true;
+    name = 'threads';
+    if (isCompactNavigation() && (options.history ?? 'none') === 'none') options = { ...options, history: 'replace' };
+  }
+  if (isCompactNavigation() && ['chat', 'artifacts'].includes(name) && !state.currentThread && !options.threadId) name = 'threads';
+  if (name !== 'projects' && !$('#fileUploadPopover').hidden) hideFileUploadPopover();
   $$('.view').forEach((view) => view.classList.toggle('active', view.dataset.view === name));
-  $$('.bottom-nav button').forEach((button) => button.classList.toggle('active', button.dataset.tab === name));
+  syncViewChrome(name, options.threadId);
+  updateNavigationHistory(name, options.history ?? 'none', options.threadId);
   if (name === 'chat') {
     renderTimeline(false);
     updateTurnArtifactsStrips();
   }
-  if (name === 'favorites') renderFavorites();
+  if (name === 'threads') {
+    renderThreads();
+    if (state.threadListScopeKey !== threadCollectionScope().key) {
+      loadThreads().catch((error) => toast(error.message, 'error'));
+    }
+  }
   if (name === 'artifacts' && state.currentThread && state.artifactsThreadId !== state.currentThread.id) {
     loadArtifacts().catch((error) => toast(error.message, 'error'));
   }
@@ -2152,13 +2866,39 @@ function showTab(name) {
   saveUiState();
 }
 
+async function handleNavigationChange() {
+  if (!isCompactNavigation()) return;
+  const route = navigationRoute() ?? { view: 'threads' };
+  if (route.view === 'chat' && route.threadId) {
+    if (state.currentThread?.id === route.threadId) showTab('chat', { history: 'none', threadId: route.threadId });
+    else await openThread(route.threadId, { history: 'none' });
+    return;
+  }
+  if (route.view === 'artifacts' && route.threadId) {
+    if (state.currentThread?.id !== route.threadId) {
+      const opened = await openThread(route.threadId, { history: 'none' });
+      if (!opened) return;
+    }
+    showTab('artifacts', { history: 'none', threadId: route.threadId });
+    return;
+  }
+  if (route.view === 'artifacts') {
+    if (state.currentThread?.id) showTab('chat', { history: 'replace', threadId: state.currentThread.id });
+    else showTab('threads', { history: 'replace' });
+    return;
+  }
+  showTab(route.view === 'chat' ? 'threads' : route.view, { history: 'none' });
+}
+
 function connectEvents() {
   state.events?.close();
+  const subscribedAt = Date.now();
   const events = new EventSource('/api/events');
   state.events = events;
   events.onopen = () => {
     setConnection('online', '已连接');
     syncPendingRequests().catch(() => {});
+    loadThreads().catch(() => {});
     const openedRecently = state.threadOpenedAt && Date.now() - state.threadOpenedAt < 1500;
     if (state.currentThread && !state.activeTurnId && !openedRecently) {
       debug.log('refresh', 'sse-auto', { openedRecently: false });
@@ -2176,42 +2916,96 @@ function connectEvents() {
   events.addEventListener('favorites', (event) => {
     setFavoriteThreads(JSON.parse(event.data).data);
     renderThreads();
-    renderFavorites();
+  });
+  events.addEventListener('thread-activity', (event) => {
+    const activity = JSON.parse(event.data);
+    const previous = state.threadRuntimeById.get(activity.threadId);
+    applyThreadActivity(activity);
+    const eventAt = Date.parse(activity.at ?? '');
+    const isLive = !Number.isFinite(eventAt) || eventAt >= subscribedAt - 1000;
+    const becameTerminal = ['completed', 'failed', 'interrupted'].includes(activity.status)
+      && !['completed', 'failed', 'interrupted'].includes(previous?.status);
+    if (isLive && becameTerminal && activity.threadId !== state.currentThread?.id) {
+      const thread = state.threads.find((item) => item.id === activity.threadId);
+      const name = thread?.name || thread?.preview || '后台会话';
+      const label = THREAD_STATUS_LABELS[activity.status] || '状态已更新';
+      navigator.vibrate?.([80, 40, 80]);
+      toast(`${name}：${label}`);
+    }
   });
   events.addEventListener('codex', (event) => handleCodex(JSON.parse(event.data)));
   events.addEventListener('approval', (event) => {
     const request = JSON.parse(event.data);
     state.approvals.set(request.id, request);
-    for (const selector of ['#settingsSheet', '#skillSheet', '#previewDialog', '#fileShareDialog']) {
-      const dialog = $(selector);
-      if (dialog?.open) dialog.close();
+    const threadId = approvalThreadId(request);
+    const currentActivity = threadId ? state.threadRuntimeById.get(threadId) : null;
+    if (threadId && currentActivity?.status !== 'waiting') {
+      applyThreadActivity({
+        ...(currentActivity ?? { threadId, unreadCount: 0 }),
+        threadId,
+        status: 'waiting',
+        attentionCount: Math.max(1, currentActivity?.attentionCount ?? 0),
+      });
     }
-    showTab('chat');
+    const visibleHere = !threadId || threadId === state.currentThread?.id;
+    const chatActive = document.querySelector('.view.active')?.dataset.view === 'chat';
+    if (visibleHere && chatActive) {
+      for (const selector of ['#settingsSheet', '#skillSheet', '#previewDialog', '#fileShareDialog']) {
+        const dialog = $(selector);
+        if (dialog?.open) dialog.close();
+      }
+    }
     renderApprovals();
     navigator.vibrate?.([120, 60, 120]);
-    toast('Codex 正在等待确认');
+    toast(visibleHere && chatActive ? 'Codex 正在等待确认' : '有会话正在等待你处理');
   });
   events.addEventListener('approval-resolved', (event) => {
-    state.approvals.delete(JSON.parse(event.data).id);
+    const data = JSON.parse(event.data);
+    const request = state.approvals.get(data.id);
+    state.approvals.delete(data.id);
+    const threadId = approvalThreadId(request);
+    const activity = threadId ? state.threadRuntimeById.get(threadId) : null;
+    if (activity?.status === 'waiting') {
+      applyThreadActivity({
+        ...activity,
+        status: activity.activeTurnId ? (activity.phase === 'plan' ? 'planning' : 'running') : 'idle',
+        attentionCount: Math.max(0, (activity.attentionCount ?? 1) - 1),
+      });
+    }
     renderApprovals();
   });
   events.addEventListener('artifacts', (event) => {
     const data = JSON.parse(event.data);
     if (data.threadId === state.currentThread?.id) {
-      const incoming = data.items ?? [];
-      if (!incoming.length) return;
-      const existingIds = new Set(state.artifacts.map((item) => item.id));
-      const addedCount = incoming.filter((item) => !existingIds.has(item.id)).length;
-      const seen = new Set(incoming.map((item) => item.id));
-      const next = [...incoming, ...state.artifacts.filter((item) => !seen.has(item.id))];
-      if (setArtifacts(next, { resetPaging: false })) {
+      const changes = data.items ?? [];
+      if (!changes.length) return;
+      const removedPaths = new Set(changes
+        .filter((item) => item.available === false || item.status === 'deleted')
+        .map(artifactPathKey));
+      const incoming = changes.filter((item) => item.available !== false
+        && item.status !== 'deleted' && isDocumentArtifact(item));
+      const incomingPaths = new Set(incoming.map(artifactPathKey));
+      const existingPaths = new Set(state.artifacts.map(artifactPathKey));
+      const addedCount = incoming.filter((item) => !existingPaths.has(artifactPathKey(item))).length;
+      const removedCount = state.artifacts.filter((item) => removedPaths.has(artifactPathKey(item))).length;
+      const next = [...incoming, ...state.artifacts.filter((item) => {
+        const key = artifactPathKey(item);
+        return !removedPaths.has(key) && !incomingPaths.has(key);
+      })];
+      if (setArtifacts(next)) {
         state.artifactsThreadId = data.threadId;
-        state.artifactsTotal = Math.max(state.artifacts.length, state.artifactsTotal + addedCount);
+        state.artifactsTotal = Math.max(state.artifacts.length, state.artifactsTotal + addedCount - removedCount);
         renderArtifacts();
         refreshTimelineAfterArtifacts();
-        toast(`发现 ${incoming.length} 个产出物`);
+        if (incoming.length) toast(`发现 ${incoming.length} 个文档`);
       }
     }
+  });
+  events.addEventListener('artifact-history-ready', (event) => {
+    const data = JSON.parse(event.data);
+    if (data.threadId !== state.currentThread?.id) return;
+    state.artifactsHistoryPending = true;
+    scheduleArtifactHistoryRefresh(data.threadId, 0);
   });
   for (const type of ['artifact-error', 'ownership-error']) {
     events.addEventListener(type, (event) => toast(JSON.parse(event.data).message || '产出物处理失败', 'error'));
@@ -2263,6 +3057,12 @@ $('#closeSettingsButton').addEventListener('click', () => $('#settingsSheet').cl
 $('#skillButton').addEventListener('click', openSkillSheet);
 $('#closeSkillButton').addEventListener('click', () => $('#skillSheet').close());
 $('#closeThreadActionButton').addEventListener('click', closeThreadActionDialog);
+$('#chatBackButton').addEventListener('click', () => backToThreadHome());
+$('#artifactBackButton').addEventListener('click', backFromArtifacts);
+$('#chatThreadMoreButton').addEventListener('click', () => {
+  if (state.currentThread) openThreadActionDialog(state.currentThread, 'chat');
+});
+$('#threadArtifactsAction').addEventListener('click', openThreadArtifactsAction);
 $('#threadRenameAction').addEventListener('click', openThreadRenameDialog);
 $('#threadDeleteAction').addEventListener('click', confirmThreadDelete);
 $('#threadDeleteCancel').addEventListener('click', () => { $('#threadDeleteConfirm').hidden = true; });
@@ -2289,6 +3089,9 @@ $('#approvalReviewerSelect').addEventListener('change', (event) => {
   localStorage.setItem('codex-mobile-approvals-reviewer', state.approvalsReviewer);
   renderModeControls();
 });
+$('#themeSelect').addEventListener('change', (event) => {
+  applyTheme(event.target.value, { persist: true, rerender: true });
+});
 $('#modelSelect').addEventListener('change', (event) => {
   state.model = event.target.value;
   localStorage.setItem('codex-mobile-model', state.model);
@@ -2300,10 +3103,40 @@ $('#effortSelect').addEventListener('change', (event) => {
 $('#refinePlanButton').addEventListener('click', refinePlan);
 $('#executePlanButton').addEventListener('click', executePlan);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') syncPendingRequests().catch(() => {});
+  if (document.visibilityState === 'visible') {
+    syncPendingRequests().catch(() => {});
+    loadThreads().catch(() => {});
+  }
 });
-$('#mobileNewThreadButton').addEventListener('click', newThread);
+$('#mobileNewThreadButton').addEventListener('click', () => newThread({
+  cwd: state.projectBrowser?.current?.path ?? state.currentProject,
+}));
 $('#refreshThreadsButton').addEventListener('click', () => loadThreads().catch((error) => toast(error.message, 'error')));
+$('#loadMoreThreadsButton').addEventListener('click', () => loadThreads({ append: true }).catch((error) => toast(error.message, 'error')));
+$('#threadSearch').addEventListener('input', (event) => {
+  state.threadSearch = event.target.value;
+  renderThreads();
+});
+$$('#threadFilters [data-thread-scope]').forEach((button) => button.addEventListener('click', () => {
+  const nextScope = button.dataset.threadScope;
+  if (!['all', 'directory'].includes(nextScope) || nextScope === state.threadScope) return;
+  state.threadScope = nextScope;
+  loadThreads().catch((error) => toast(error.message, 'error'));
+}));
+$('#threadFavoriteToggle').addEventListener('click', () => {
+  state.threadFavoriteOnly = !state.threadFavoriteOnly;
+  renderThreads();
+});
+$$('#threadFilters [data-thread-filter]').forEach((button) => button.addEventListener('click', () => {
+  state.threadFilter = button.dataset.threadFilter;
+  renderThreads();
+}));
+$('#threadsView').addEventListener('scroll', (event) => {
+  const view = event.currentTarget;
+  if (view.scrollHeight - view.scrollTop - view.clientHeight < 160) {
+    loadThreads({ append: true }).catch((error) => toast(error.message, 'error'));
+  }
+}, { passive: true });
 $('#refreshArtifactsButton').addEventListener('click', () => loadArtifacts().catch((error) => toast(error.message, 'error')));
 $('#loadOlderButton').addEventListener('click', () => loadOlderTurns().catch((error) => toast(error.message, 'error')));
 initChatScroll();
@@ -2327,7 +3160,6 @@ let artifactSearchTimer = null;
 $('#artifactSearch').addEventListener('input', (event) => {
   clearTimeout(artifactSearchTimer);
   state.artifactQuery = event.target.value;
-  state.artifactOtherShown = ARTIFACT_OTHER_PAGE;
   artifactSearchTimer = setTimeout(() => {
     loadArtifactSearch(state.artifactQuery).catch((error) => toast(error.message, 'error'));
   }, 180);
@@ -2335,11 +3167,6 @@ $('#artifactSearch').addEventListener('input', (event) => {
 $('#artifactList').addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
-  if (button.dataset.action === 'more') {
-    state.artifactOtherShown += ARTIFACT_OTHER_STEP;
-    renderArtifacts();
-    return;
-  }
   if (button.dataset.action === 'load-more') {
     button.disabled = true;
     const action = state.artifactQuery.trim()
@@ -2368,9 +3195,17 @@ $('#timeline').addEventListener('click', (event) => {
     if (artifact) openArtifact(artifact);
     return;
   }
-  if (event.target.closest('.turn-artifacts-more')) showTab('artifacts');
+  if (event.target.closest('.turn-artifacts-more')) openCurrentThreadArtifacts();
 });
 $('#projectUpButton').addEventListener('click', () => browseProjects(state.projectBrowser.parent).catch((error) => toast(error.message, 'error')));
+bindLongPress($('#projectPath'), () => {
+  const current = state.projectBrowser?.current;
+  if (current) showFileActions({ ...current, isDirectory: true, isCurrent: true }, $('#projectPath'));
+});
+$('#projectPath').addEventListener('click', () => {
+  const current = state.projectBrowser?.current;
+  if (current) showFileActions({ ...current, isDirectory: true, isCurrent: true }, $('#projectPath'));
+});
 $('#desktopUploadProjectFilesButton').addEventListener('click', () => openProjectFilePicker(state.projectBrowser?.current?.path));
 $('#uploadProjectFilesButton').addEventListener('click', () => {
   const directory = fileActionTarget?.path ?? state.projectBrowser?.current?.path;
@@ -2387,8 +3222,7 @@ $('#projectFileInput').addEventListener('change', (event) => {
   event.target.value = '';
   uploadProjectFiles(files, directory).catch((error) => toast(error.message, 'error'));
 });
-const fileDirectoryButton = $('#fileDirectoryButton');
-bindLongPress(fileDirectoryButton, showCurrentDirectoryActions);
+initNegativeScreenGestures();
 document.addEventListener('pointerdown', (event) => {
   if ($('#fileUploadPopover').hidden) return;
   if (event.target.closest('#fileUploadPopover, [aria-expanded="true"]')) return;
@@ -2411,9 +3245,11 @@ $('#projectDeleteDialog').addEventListener('close', () => { projectDeleteTarget 
 $('#closePreviewButton').addEventListener('click', () => $('#previewDialog').close());
 $('#sharePreviewButton').addEventListener('click', () => openFileShare(state.currentArtifact));
 $('#modifyArtifactButton').addEventListener('click', modifyCurrentArtifact);
-$$('.bottom-nav button').forEach((button) => button.addEventListener('click', () => {
-  if (button.dataset.tab) showTab(button.dataset.tab);
-}));
+window.addEventListener('popstate', () => { handleNavigationChange().catch((error) => toast(error.message, 'error')); });
+window.matchMedia?.('(max-width: 780px)')?.addEventListener?.('change', () => {
+  syncViewChrome();
+  loadThreads().catch(() => {});
+});
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 initialize().catch((error) => {

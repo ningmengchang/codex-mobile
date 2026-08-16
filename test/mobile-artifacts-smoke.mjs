@@ -70,6 +70,12 @@ const artifacts = [
     path: '/home/ningmengchang/docs/old-report.md',
   }),
 ];
+const historicalArtifact = artifact({
+  id: 'art-history', token: 'tok-history', threadId: 'thread-1', turnId: null,
+  source: 'conversation', status: 'linked', name: '历史验收报告.pdf',
+  relativePath: '历史材料/历史验收报告.pdf', fileKind: 'pdf', size: 18240,
+  modifiedAt: '2026-08-06T08:00:00.000Z', path: '/home/ningmengchang/历史材料/历史验收报告.pdf',
+});
 const linkedDirectory = artifact({
   id: 'linked-dir', token: 'tok-dir', name: '最终材料', relativePath: '最终材料',
   fileKind: 'directory', isDirectory: true, size: 4096,
@@ -80,7 +86,8 @@ const linkedReport = artifact({
   fileKind: 'markdown', isDirectory: false, size: 120,
   path: '/home/ningmengchang/最终材料/最终报告.md',
 });
-const previewArtifacts = [...artifacts, linkedDirectory, linkedReport];
+const previewArtifacts = [...artifacts, historicalArtifact, linkedDirectory, linkedReport];
+let historyReady = false;
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -142,13 +149,15 @@ try {
       const search = (url.searchParams.get('search') ?? '').trim().toLowerCase();
       const offset = Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
       const limit = Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100;
+      const availableArtifacts = historyReady ? [...artifacts, historicalArtifact] : artifacts;
       const filtered = search
-        ? artifacts.filter((item) => `${item.name} ${item.relativePath}`.toLowerCase().includes(search))
-        : artifacts;
+        ? availableArtifacts.filter((item) => `${item.name} ${item.relativePath}`.toLowerCase().includes(search))
+        : availableArtifacts;
       return fulfillJson({
         data: filtered.slice(offset, offset + limit),
         total: filtered.length,
         nextOffset: offset + limit < filtered.length ? offset + limit : null,
+        scope: { kind: 'documents', history: true, historyPending: !historyReady },
       });
     }
     if (pathname === '/api/files/resolve' && route.request().method() === 'POST') {
@@ -196,7 +205,6 @@ try {
 
   await page.goto('http://127.0.0.1:39881/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('button[data-tab="threads"]').click();
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.locator('#emptyState').waitFor({ state: 'hidden', timeout: 15_000 });
   await page.locator('.message.user .bubble').waitFor({ timeout: 10_000 });
@@ -229,24 +237,46 @@ try {
   await page.waitForFunction(() => document.querySelector('#previewBody')?.textContent?.includes('内容预览'));
   await page.locator('#closePreviewButton').click();
 
-  // 3) “全部”跳到产出物 tab，文档优先排最前
+  // 3) “全部”进入当前会话的产出物二级页，文档优先排最前
   await page.locator('.turn-artifacts-more').click();
   await page.locator('#artifactsView.active').waitFor({ timeout: 10_000 });
   const artifactsHead = await page.evaluate(() => {
-    const h2 = document.querySelector('#artifactsView .section-head h2');
     const search = document.querySelector('#artifactSearch');
-    return { titlePresent: Boolean(h2), searchTop: search ? Math.round(search.getBoundingClientRect().top) : null };
+    return {
+      title: document.querySelector('#artifactDetailName')?.textContent,
+      scope: document.querySelector('#artifactScope')?.textContent,
+      route: location.hash,
+      detail: document.body.classList.contains('mobile-artifacts-detail'),
+      navigationRemoved: !document.querySelector('.bottom-nav'),
+      searchTop: search ? Math.round(search.getBoundingClientRect().top) : null,
+    };
   });
-  if (artifactsHead.titlePresent) throw new Error(`产出物页仍存在标题：${JSON.stringify(artifactsHead)}`);
+  if (artifactsHead.title !== '产出物测试' || !artifactsHead.scope.includes('历史文档同步中')) throw new Error(`产出物页会话范围错误：${JSON.stringify(artifactsHead)}`);
+  if (artifactsHead.route !== '#artifacts/thread-1' || !artifactsHead.detail) throw new Error(`产出物二级路由错误：${JSON.stringify(artifactsHead)}`);
+  if (!artifactsHead.navigationRemoved) throw new Error(`产出物二级页仍存在主导航：${JSON.stringify(artifactsHead)}`);
   if (artifactsHead.searchTop >= 110) throw new Error(`搜索框未上移：${JSON.stringify(artifactsHead)}`);
+  await page.screenshot({ path: process.env.CODEX_MOBILE_DETAIL_SCREENSHOT ?? '/tmp/codex-mobile-artifacts-detail.png', fullPage: true });
   const sections = await page.locator('.artifact-section').allTextContents();
-  if (!sections.includes('文档产出')) throw new Error(`缺少“文档产出”分组：${sections.join(',')}`);
+  if (JSON.stringify(sections) !== JSON.stringify(['历史文档'])) throw new Error(`历史文档分组错误：${sections.join(',')}`);
+  const initialArtifactNames = await page.locator('.artifact-card-main strong').allTextContents();
+  if (JSON.stringify([...initialArtifactNames].sort()) !== JSON.stringify(['menu-manage-prd.md', '菜单管理 PRD.docx'].sort())) {
+    throw new Error(`代码、图片或已删除文件未被过滤：${initialArtifactNames.join(',')}`);
+  }
   const firstCardText = await page.locator('.artifact-card').first().textContent();
   if (!firstCardText.includes('PRD')) throw new Error(`文档未排到最前：${firstCardText}`);
   const timeTexts = await page.locator('.artifact-card .artifact-time').allTextContents();
   if (!timeTexts.length || timeTexts.every((text) => !text.trim())) {
     throw new Error(`产出物卡片缺少修改时间：${timeTexts.join(',')}`);
   }
+
+  // 后台历史索引完成后自动补入文档，不阻塞首次打开。
+  historyReady = true;
+  await page.evaluate(() => {
+    window.__sse.emit('artifact-history-ready', { threadId: 'thread-1' });
+  });
+  await page.locator('.artifact-card', { hasText: '历史验收报告.pdf' }).waitFor({ timeout: 10_000 });
+  await page.waitForFunction(() => document.querySelector('#artifactScope')?.textContent?.includes('全部历史文档'));
+
   const firstShareButton = page.locator('.artifact-card button[data-action="share"]').first();
   await firstShareButton.click();
   await page.locator('#fileShareDialog[open]').waitFor();
@@ -268,13 +298,13 @@ try {
   await page.locator('#artifactSearch').fill('prd');
   await page.waitForTimeout(250);
   const searchCards = await page.locator('.artifact-card').count();
-  if (searchCards !== 4) throw new Error(`搜索 prd 应剩 4 张卡片，实际 ${searchCards}`);
+  if (searchCards !== 2) throw new Error(`搜索 prd 应剩 2 张文档卡片，实际 ${searchCards}`);
   await page.locator('#artifactSearch').fill('不存在xyz');
   await page.locator('.empty-list', { hasText: '没有匹配' }).waitFor({ timeout: 10_000 });
   await page.locator('#artifactSearch').fill('');
   await page.waitForTimeout(250);
   const restoredCards = await page.locator('.artifact-card').count();
-  if (restoredCards !== 6) throw new Error(`清空搜索应恢复 6 张卡片，实际 ${restoredCards}`);
+  if (restoredCards !== 3) throw new Error(`清空搜索应恢复 3 张文档卡片，实际 ${restoredCards}`);
 
   // 5) 新卡片布局：类型徽标存在，置顶按钮已移除
   const kindTexts = await page.locator('.artifact-card .artifact-kind').allTextContents();
@@ -296,7 +326,8 @@ try {
   await page.waitForTimeout(150);
   await page.evaluate(() => document.activeElement?.blur());
   await page.waitForFunction(() => !document.body.classList.contains('keyboard-open'));
-  await page.locator('button[data-tab="chat"]').click();
+  await page.locator('#artifactBackButton').click();
+  await page.locator('#chatView.active').waitFor({ timeout: 10_000 });
   await page.locator('.turn-artifact-chip', { hasText: '登录日志 PRD.md' }).waitFor({ timeout: 10_000 });
   const chipsAfterSse = await page.locator('.turn-artifact-chip').count();
   if (chipsAfterSse !== 3) throw new Error(`SSE 后应显示 3 个文档芯片，实际 ${chipsAfterSse}`);

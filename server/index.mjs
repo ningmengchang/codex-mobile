@@ -5,17 +5,19 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AppServerBridge, approvalResponse } from './app-server.mjs';
 import { ArtifactTracker } from './artifacts.mjs';
+import { createConversationArtifacts } from './conversation-artifacts.mjs';
 import { clearSessionCookie, COOKIE_NAME, exchangePairingCode, requireSession, sessionCookie } from './auth.mjs';
 import { loadConfig } from './config.mjs';
 import { convertOfficeToPdf, getPdfPageCount, renderPdfPage } from './convert.mjs';
 import { createDingTalk } from './dingtalk.mjs';
 import { EventHub } from './events.mjs';
 import { createFavoritesStore } from './favorites.mjs';
-import { classifyFile, fileMetadata, mimeType } from './files.mjs';
+import { classifyFile, fileMetadata, isDocumentPath, mimeType } from './files.mjs';
 import { listSkills } from './skills.mjs';
 import { createSkillMarket } from './skill-market.mjs';
 import { createRolloutHistory, isRolloutCursor } from './rollout-history.mjs';
 import { readWorkbook, readWorksheet } from './spreadsheet.mjs';
+import { createThreadActivityStore } from './thread-activity.mjs';
 import { receiveUpload } from './uploads.mjs';
 import { createProjectEntry, deleteProjectEntry } from './project-files.mjs';
 import {
@@ -241,8 +243,15 @@ function listDirectory(directoryPath, config) {
 }
 
 function threadAllowed(thread, config) {
-  const cwd = path.resolve(String(thread?.cwd ?? '/'));
-  return config.allowedRoots.some((root) => isInside(root, cwd));
+  try {
+    const cwd = fs.realpathSync(path.resolve(String(thread?.cwd ?? '/')));
+    return fs.statSync(cwd).isDirectory()
+      && config.allowedRoots.some((root) => isInside(root, cwd));
+  } catch {
+    // Historical rollouts can outlive their workspace directory. They should
+    // not make the entire conversation list fail to load.
+    return false;
+  }
 }
 
 function isThreadGone(error) {
@@ -324,23 +333,19 @@ function listProjects(config, requestedPath) {
   };
 }
 
-async function listThreads(bridge, config, cwd) {
-  const data = [];
-  let cursor = null;
-  for (let page = 0; page < 10; page += 1) {
-    const result = await bridge.request('thread/list', {
-      cursor,
-      limit: 100,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      archived: false,
-      ...(cwd ? { cwd } : {}),
-    });
-    data.push(...(result?.data ?? []).filter((thread) => threadAllowed(thread, config)));
-    cursor = result?.nextCursor ?? null;
-    if (!cursor) break;
-  }
-  return data;
+async function listThreads(bridge, config, options = {}) {
+  const result = await bridge.request('thread/list', {
+    cursor: options.cursor || null,
+    limit: Math.min(Math.max(options.limit ?? 100, 1), 100),
+    sortKey: 'updated_at',
+    sortDirection: 'desc',
+    archived: false,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  });
+  return {
+    data: (result?.data ?? []).filter((thread) => threadAllowed(thread, config)),
+    nextCursor: result?.nextCursor ?? null,
+  };
 }
 
 function userInput(body, cwd, config) {
@@ -393,24 +398,39 @@ function turnSettings(body, cwd, catalogs, config) {
   };
 }
 
-function wireBridge(bridge, tracker, hub, config) {
+function wireBridge(bridge, tracker, threadActivity, hub, config) {
   bridge.on('status', (status) => hub.publish('bridge-status', status));
   bridge.on('bridgeError', (error) => {
     log(config, 'error', 'App Server bridge error', error.stack ?? error.message);
     hub.publish('bridge-error', { message: error.message });
   });
   bridge.on('stderr', (chunk) => log(config, 'debug', 'app-server', chunk.trim()));
-  bridge.on('serverRequest', (request) => hub.publish('approval', request));
-  bridge.on('serverRequestResolved', (request) => hub.publish('approval-resolved', request));
+  bridge.on('serverRequest', (request) => {
+    threadActivity.waitForInput(request);
+    hub.publish('approval', request);
+  });
+  bridge.on('serverRequestResolved', (request) => {
+    threadActivity.resolveRequest(request);
+    hub.publish('approval-resolved', request);
+  });
   bridge.on('notification', (message) => {
     const params = message.params ?? {};
     if (message.method === 'thread/started' && params.thread) tracker.registerThread(params.thread.id, params.thread.cwd);
-    if (message.method === 'turn/started') tracker.bindTurn(params.threadId, params.turn?.id ?? params.turnId);
+    if (message.method === 'turn/started') {
+      const threadId = params.threadId ?? params.thread_id;
+      const turnId = params.turn?.id ?? params.turnId ?? params.turn_id;
+      tracker.bindTurn(threadId, turnId);
+      const phase = threadActivity.get(threadId)?.phase ?? 'default';
+      threadActivity.start(threadId, turnId, phase);
+    }
     if (message.method === 'item/completed' && params.item?.type === 'fileChange') {
       tracker.recordProtocolChanges(params.threadId, params.turnId, params.item.changes);
     }
     if (message.method === 'turn/completed') {
-      tracker.finish(params.threadId, params.turn?.id ?? params.turnId)
+      const threadId = params.threadId ?? params.thread_id;
+      const turnId = params.turn?.id ?? params.turnId ?? params.turn_id;
+      threadActivity.complete(threadId, turnId, params.turn?.status ?? params.status ?? 'completed');
+      tracker.finish(threadId, turnId)
         .catch((error) => hub.publish('artifact-error', { message: error.message }));
     }
     hub.publish('codex', message);
@@ -426,6 +446,13 @@ export function createCodexMobileServer(options = {}) {
   const favorites = options.favorites ?? createFavoritesStore(config);
   const skillMarket = options.skillMarket ?? createSkillMarket(config);
   const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
+  const conversationArtifacts = options.conversationArtifacts ?? createConversationArtifacts(config, {
+    onReady: ({ threadId }) => hub.publish('artifact-history-ready', { threadId }),
+    onError: ({ threadId, error }) => hub.publish('artifact-error', { threadId, message: error.message }),
+  });
+  const threadActivity = options.threadActivity ?? createThreadActivityStore(config, {
+    onChange: (activity) => hub.publish('thread-activity', activity),
+  });
   const documentTools = {
     convertOfficeToPdf: options.convertOfficeToPdf ?? convertOfficeToPdf,
     getPdfPageCount: options.getPdfPageCount ?? getPdfPageCount,
@@ -482,13 +509,15 @@ export function createCodexMobileServer(options = {}) {
       cwd: thread.cwd ?? fallbackCwd ?? previous.cwd,
       path: thread.path ?? previous.path,
       status: thread.status ?? previous.status,
+      name: thread.name ?? previous.name,
+      updatedAt: thread.updatedAt ?? previous.updatedAt,
     });
   };
   const publishFavorites = (data = favorites.list()) => {
     hub.publish('favorites', { data });
     return data;
   };
-  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, hub, config);
+  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config);
 
   const server = http.createServer(async (request, response) => {
     const startedAt = Date.now();
@@ -611,10 +640,13 @@ export function createCodexMobileServer(options = {}) {
       }
       if (request.method === 'GET' && pathname === '/api/bootstrap') {
         void refreshCatalogs().catch((error) => log(config, 'debug', 'Catalog refresh failed', error.message));
+        const pendingRequests = bridge.getServerRequests();
+        threadActivity.syncRequests(pendingRequests);
         json(response, 200, {
           ...catalogPayload(),
           appServer: bridge.status(),
-          pendingRequests: bridge.getServerRequests(),
+          pendingRequests,
+          threadActivities: threadActivity.list(),
           favorites: favorites.list(),
           projects: listProjects(config),
           runtime: {
@@ -672,12 +704,23 @@ export function createCodexMobileServer(options = {}) {
       if (request.method === 'GET' && pathname === '/api/threads') {
         const cwd = url.searchParams.get('cwd');
         const project = cwd ? validateProject(cwd, config) : null;
-        const threads = await listThreads(bridge, config, project);
-        for (const thread of threads) {
-          tracker.registerThread(thread.id, thread.cwd);
+        const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100, 1), 100);
+        const cursor = url.searchParams.get('cursor') || null;
+        const page = await listThreads(bridge, config, { cwd: project, limit, cursor });
+        const threads = [];
+        for (const item of page.data) {
+          const thread = threadActivity.reconcile(item);
+          try {
+            tracker.registerThread(thread.id, thread.cwd);
+          } catch (error) {
+            // The directory can disappear between listing and registration.
+            if (error?.code === 'NOT_FOUND' || error?.code === 'PATH_NOT_ALLOWED') continue;
+            throw error;
+          }
           rememberThread(thread);
+          threads.push(thread);
         }
-        json(response, 200, { data: threads });
+        json(response, 200, { data: threads, nextCursor: page.nextCursor });
         return;
       }
       if (request.method === 'POST' && pathname === '/api/threads') {
@@ -694,7 +737,7 @@ export function createCodexMobileServer(options = {}) {
         });
         tracker.registerThread(result.thread.id, cwd);
         rememberThread(result.thread, cwd);
-        json(response, 201, result);
+        json(response, 201, { ...result, thread: threadActivity.attach(result.thread) });
         return;
       }
 
@@ -704,7 +747,7 @@ export function createCodexMobileServer(options = {}) {
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
         tracker.registerThread(result.thread.id, result.thread.cwd);
         rememberThread(result.thread);
-        json(response, 200, result);
+        json(response, 200, { ...result, thread: threadActivity.reconcile(result.thread) });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/name$/);
@@ -715,15 +758,21 @@ export function createCodexMobileServer(options = {}) {
         if (name.length > 100) throw new AppError('会话名称过长。', 400, 'NAME_TOO_LONG');
         const result = await bridge.request('thread/name/set', { threadId: match[0], name });
         if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.rename(match[0], name));
-        json(response, 200, result);
+        json(response, 200, { ...result, thread: threadActivity.attach(result.thread) });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/delete$/);
       if (request.method === 'POST' && match) {
         const result = await bridge.request('thread/delete', { threadId: match[0] });
         threadMeta.delete(match[0]);
+        threadActivity.remove(match[0]);
         if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.remove(match[0]));
         json(response, 200, { deleted: true, result });
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/read$/);
+      if (request.method === 'POST' && match) {
+        json(response, 200, { activity: threadActivity.markSeen(match[0]) });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/resume$/);
@@ -736,7 +785,7 @@ export function createCodexMobileServer(options = {}) {
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
         tracker.registerThread(result.thread.id, result.cwd);
         rememberThread(result.thread, result.cwd);
-        json(response, 200, result);
+        json(response, 200, { ...result, thread: threadActivity.attach(result.thread) });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns$/);
@@ -830,9 +879,10 @@ export function createCodexMobileServer(options = {}) {
             recreated = true;
           }
           tracker.bindTurn(activeThreadId, result.turn.id);
+          const activity = threadActivity.start(activeThreadId, result.turn.id, body.mode ?? 'default');
           json(response, 201, {
             ...result,
-            thread: { id: activeThreadId, cwd },
+            thread: { id: activeThreadId, cwd, activity },
             recreated,
           });
         } catch (error) {
@@ -856,7 +906,8 @@ export function createCodexMobileServer(options = {}) {
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns\/([^/]+)\/interrupt$/);
       if (request.method === 'POST' && match) {
         const result = await bridge.request('turn/interrupt', { threadId: match[0], turnId: match[1] });
-        json(response, 200, result ?? { interrupted: true });
+        const activity = threadActivity.complete(match[0], match[1], 'interrupted');
+        json(response, 200, { ...(result ?? { interrupted: true }), activity });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/artifacts$/);
@@ -864,7 +915,34 @@ export function createCodexMobileServer(options = {}) {
         const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100, 1), 200);
         const offset = Math.max(Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
         const search = String(url.searchParams.get('search') ?? '').trim().toLowerCase();
-        const items = tracker.list(match[0]);
+        const threadId = match[0];
+        const tracked = tracker.list(threadId);
+        let meta = threadMeta.get(threadId);
+        if (!meta?.path) {
+          const read = await bridge.request('thread/read', { threadId, includeTurns: false });
+          if (!threadAllowed(read.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
+          rememberThread(read.thread);
+          meta = threadMeta.get(threadId);
+        }
+        const recoveredSnapshot = meta?.path
+          ? (conversationArtifacts.snapshot?.({ id: threadId, ...meta })
+            ?? { items: await conversationArtifacts.list({ id: threadId, ...meta }), pending: false })
+          : { items: [], pending: false };
+        const recovered = recoveredSnapshot.items ?? [];
+        const seen = new Set();
+        const items = [];
+        for (const item of [...tracked, ...recovered]) {
+          if (!isDocumentPath(item.relativePath ?? item.name) || item.available === false || item.status === 'deleted') continue;
+          const key = `${item.projectPath ?? meta?.cwd ?? ''}\0${item.relativePath ?? item.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          items.push(item);
+        }
+        items.sort((left, right) => {
+          const leftTime = Date.parse(left.modifiedAt ?? left.capturedAt ?? '') || 0;
+          const rightTime = Date.parse(right.modifiedAt ?? right.capturedAt ?? '') || 0;
+          return rightTime - leftTime;
+        });
         const filtered = search
           ? items.filter((item) => `${item.name ?? ''} ${item.relativePath ?? ''}`.toLowerCase().includes(search))
           : items;
@@ -873,11 +951,22 @@ export function createCodexMobileServer(options = {}) {
           data: filtered.slice(offset, offset + limit),
           total: filtered.length,
           nextOffset,
+          scope: {
+            threadId,
+            name: meta?.name ?? null,
+            cwd: meta?.cwd ?? tracked[0]?.projectPath ?? null,
+            source: tracked.length && recovered.length ? 'mixed' : recovered.length ? 'conversation' : 'tracked',
+            kind: 'documents',
+            history: true,
+            historyPending: recoveredSnapshot.pending === true,
+          },
         });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/requests') {
-        json(response, 200, { data: bridge.getServerRequests() });
+        const requests = bridge.getServerRequests();
+        threadActivity.syncRequests(requests);
+        json(response, 200, { data: requests });
         return;
       }
       match = routeMatch(pathname, /^\/api\/requests\/([^/]+)\/respond$/);
@@ -1047,7 +1136,7 @@ export function createCodexMobileServer(options = {}) {
     }
   });
 
-  return { server, config, bridge, tracker, hub, dingtalk, skillMarket };
+  return { server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity, conversationArtifacts };
 }
 
 const isMain = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
