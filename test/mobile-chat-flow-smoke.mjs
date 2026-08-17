@@ -154,6 +154,13 @@ try {
   if (await page.locator('#scrollLatestButton').isVisible()) throw new Error('回到底部后按钮未隐藏');
 
   // 4) 分页加载更早历史保留：顶部上翻自动加载，位置锚定
+  // 显式经过阈值上方，模拟真实手势的连续滚动，避免内容密度变化后只派发终点事件。
+  await page.evaluate(() => {
+    const el = document.querySelector('#chatView');
+    el.scrollTop = Math.min(120, Math.max(0, el.scrollHeight - el.clientHeight));
+    el.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(50);
   await page.evaluate(() => {
     const el = document.querySelector('#chatView');
     el.scrollTop = 0;

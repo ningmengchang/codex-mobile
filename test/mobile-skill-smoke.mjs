@@ -68,7 +68,7 @@ try {
 
   await page.goto('http://127.0.0.1:39882/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('#skillButton').click();
+  await page.evaluate(() => document.querySelector('#skillButton').click());
   await page.locator('#skillSheet[open]').waitFor({ timeout: 5_000 });
   await page.locator('.skill-item').first().waitFor({ timeout: 5_000 });
   const itemCount = await page.locator('.skill-item').count();

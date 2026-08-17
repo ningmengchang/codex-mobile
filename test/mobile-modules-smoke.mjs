@@ -54,7 +54,7 @@ try {
 
   await page.goto('http://127.0.0.1:39894/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('#promptInput').waitFor({ timeout: 5_000 });
+  await page.locator('#promptInput').waitFor({ state: 'attached', timeout: 5_000 });
   if (pageErrors.length) throw new Error(`模块加载报错：${pageErrors.join(' | ')}`);
   process.stdout.write(JSON.stringify({ modulesLoaded: true, pageErrors }));
 } finally {

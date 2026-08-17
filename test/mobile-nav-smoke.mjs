@@ -221,16 +221,23 @@ try {
     throw new Error(`默认主题异常：${JSON.stringify(initialTheme)}`);
   }
   await page.locator('#themeSelect').selectOption('light');
+  await page.waitForTimeout(180);
   const lightTheme = await page.evaluate(() => ({
     dataset: document.documentElement.dataset.theme,
     selected: document.querySelector('#themeSelect').value,
     stored: localStorage.getItem('codex-mobile-theme'),
     bodyBackground: getComputedStyle(document.body).backgroundColor,
     dialogBackground: getComputedStyle(document.querySelector('#settingsSheet')).backgroundColor,
+    selectBackground: getComputedStyle(document.querySelector('#themeSelect')).backgroundColor,
+    selectColor: getComputedStyle(document.querySelector('#themeSelect')).color,
+    closeBackground: getComputedStyle(document.querySelector('#closeSettingsButton')).backgroundColor,
+    closeColor: getComputedStyle(document.querySelector('#closeSettingsButton')).color,
     themeColor: document.querySelector('#themeColorMeta').content,
   }));
   if (lightTheme.dataset !== 'light' || lightTheme.selected !== 'light' || lightTheme.stored !== 'light'
     || lightTheme.bodyBackground !== 'rgb(243, 245, 247)' || lightTheme.dialogBackground !== 'rgb(255, 255, 255)'
+    || lightTheme.selectBackground !== 'rgb(247, 249, 250)' || lightTheme.selectColor !== 'rgb(24, 35, 46)'
+    || lightTheme.closeBackground !== 'rgb(255, 255, 255)' || lightTheme.closeColor !== 'rgb(24, 35, 46)'
     || lightTheme.themeColor !== '#f3f5f7') {
     throw new Error(`浅色主题未完整应用：${JSON.stringify(lightTheme)}`);
   }

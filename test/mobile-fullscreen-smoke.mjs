@@ -9,6 +9,9 @@ const playwrightPath = process.env.PLAYWRIGHT_PATH
 const { chromium } = require(playwrightPath);
 
 const publicRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+const thread = {
+  id: 'thread-fullscreen', cwd: '/home/ningmengchang', name: '全屏测试', preview: '', status: 'idle', updatedAt: 1, turns: [],
+};
 const bootstrap = {
   appServer: { ready: true },
   runtime: { user: 'ningmengchang' },
@@ -41,7 +44,11 @@ try {
     if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
-    if (pathname === '/api/threads' && route.request().method() === 'GET') return fulfillJson({ data: [] });
+    if (pathname === '/api/threads' && route.request().method() === 'GET') return fulfillJson({ data: [thread] });
+    if (pathname === `/api/threads/${thread.id}` && route.request().method() === 'GET') return fulfillJson({ thread });
+    if (pathname === `/api/threads/${thread.id}/resume`) return fulfillJson({ thread });
+    if (pathname === `/api/threads/${thread.id}/turns`) return fulfillJson({ data: [], nextCursor: null });
+    if (pathname === `/api/threads/${thread.id}/artifacts`) return fulfillJson({ data: [] });
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
@@ -60,7 +67,12 @@ try {
 
   await page.goto('http://127.0.0.1:39896/', { waitUntil: 'domcontentloaded' });
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
-  await page.locator('#fullscreenButton').waitFor({ state: 'attached', timeout: 5_000 });
+  await page.waitForFunction(() => document.querySelector('#startupScreen')?.hidden
+    && !document.body.classList.contains('thread-loading-active'), null, { timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelector('#mobileThreadList .thread-item'));
+  await page.evaluate(() => document.querySelector('#mobileThreadList .thread-item').click());
+  await page.locator('#chatView.active').waitFor({ timeout: 10_000 });
+  await page.locator('#fullscreenButton').waitFor({ state: 'visible', timeout: 5_000 });
 
   // 0) manifest 声明安装态全屏
   const manifest = await page.evaluate(async () => {
