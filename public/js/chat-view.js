@@ -111,6 +111,11 @@ export function renderModeControls() {
     button.disabled = Boolean(state.activeTurnId);
   }
   $('#modelSelect').disabled = Boolean(state.activeTurnId);
+  const backendSelect = $('#backendSelect');
+  if (backendSelect) {
+    const availableBackends = state.bootstrap?.backends?.data?.filter((item) => item.available).length ?? 0;
+    backendSelect.disabled = state.backendSwitching || availableBackends < 2;
+  }
   $('#effortSelect').disabled = Boolean(state.activeTurnId);
   $('#approvalReviewerSelect').disabled = Boolean(state.activeTurnId);
   $('#approvalReviewerSelect').value = state.approvalsReviewer;
@@ -119,7 +124,7 @@ export function renderModeControls() {
     ? state.effort
     : (state.bootstrap?.defaultEffort || 'max');
   $('#modeNotice').innerHTML = planning
-    ? '<strong>规划模式 · 只读</strong><span>Codex 会调研、提问并整理方案，不会修改项目；确认方案后再执行。</span>'
+    ? '<strong>规划模式 · 只读</strong><span>Codex 会先调研，必要时集中提问一次，再整理可确认的方案。</span>'
     : `<strong>执行模式 · 可写</strong><span>${state.approvalsReviewer === 'auto_review' ? '权限升级由 Codex 自动审查风险；高风险请求仍可能交给你确认。' : '需要额外权限时会在手机端逐次询问。'}</span>`;
   $('#promptInput').placeholder = planning
     ? '描述目标，Codex 会先调研并给出可确认的方案…'

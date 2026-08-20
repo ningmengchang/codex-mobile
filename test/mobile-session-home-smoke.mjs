@@ -57,6 +57,12 @@ try {
   });
   await context.addInitScript(() => {
     const listeners = new Map();
+    window.__nativeThreadNotifications = [];
+    window.CodexNativeNotifications = {
+      threadStatusChanged(threadId, threadName, status) {
+        window.__nativeThreadNotifications.push({ threadId, threadName, status });
+      },
+    };
     class FakeEventSource {
       constructor() { setTimeout(() => this.onopen?.(), 20); }
       addEventListener(type, callback) {
@@ -202,6 +208,14 @@ try {
     lastTerminalStatus: 'completed', completedAt: Date.now(), updatedAt: Date.now(),
   };
   await page.evaluate((activity) => window.__emitSessionEvent('thread-activity', activity), activityB);
+  await page.evaluate((activity) => window.__emitSessionEvent('thread-activity', activity), activityB);
+  const nativeNotifications = await page.evaluate(() => window.__nativeThreadNotifications);
+  if (nativeNotifications.length !== 1
+      || nativeNotifications[0].threadId !== 'thread-b'
+      || nativeNotifications[0].threadName !== '并行任务 B'
+      || nativeNotifications[0].status !== 'completed') {
+    throw new Error(`安卓会话通知桥接异常：${JSON.stringify(nativeNotifications)}`);
+  }
   await page.evaluate(() => window.__emitSessionEvent('codex', {
     method: 'turn/completed', params: { threadId: 'thread-b', turn: { id: 'turn-b', status: 'completed' } },
   }));
@@ -221,7 +235,7 @@ try {
   if (readBCount !== 1) throw new Error(`读取确认次数异常：${readBCount}`);
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-session-home.png', fullPage: true });
-  process.stdout.write(`${JSON.stringify({ listQuery, detailLayout, readBCount })}\n`);
+  process.stdout.write(`${JSON.stringify({ listQuery, detailLayout, readBCount, nativeNotifications })}\n`);
 } finally {
   await browser.close();
 }

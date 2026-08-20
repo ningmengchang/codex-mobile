@@ -38,6 +38,51 @@ export function loadConfig(overrides = {}) {
   fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
 
   const secretPath = overrides.secretPath ?? path.join(dataDir, 'secret');
+  const codexBin = overrides.codexBin
+    ?? process.env.CODEX_MOBILE_CODEX_BIN
+    ?? (fs.existsSync('/opt/codex-mobile/bin/codex')
+      ? '/opt/codex-mobile/bin/codex'
+      : '/home/ningmengchang/.local/bin/codex');
+  const codexHome = overrides.codexHome ?? process.env.CODEX_HOME ?? '/root/.codex';
+  const appServerArgs = overrides.appServerArgs ?? ['app-server', '--stdio'];
+  const defaultModel = overrides.defaultModel
+    ?? process.env.CODEX_MOBILE_DEFAULT_MODEL
+    ?? 'gpt-5.6-sol';
+  const defaultEffort = overrides.defaultEffort
+    ?? process.env.CODEX_MOBILE_DEFAULT_EFFORT
+    ?? 'max';
+  const skillsRoots = overrides.skillsRoots
+    ?? (process.env.CODEX_MOBILE_SKILLS_ROOTS
+      ? process.env.CODEX_MOBILE_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
+      : ['/home/ningmengchang/.codex/skills', '/home/ningmengchang/.agents/skills']);
+  const deepseekHome = process.env.CODEX_MOBILE_DEEPSEEK_HOME ?? '/home/ningmengchang/.codex-ds';
+  const deepseekSkillsRoots = process.env.CODEX_MOBILE_DEEPSEEK_SKILLS_ROOTS
+    ? process.env.CODEX_MOBILE_DEEPSEEK_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
+    : [path.join(deepseekHome, 'skills'), '/home/ningmengchang/.agents/skills'];
+  const codexBackends = overrides.codexBackends ?? [
+    {
+      id: 'gpt',
+      label: 'GPT',
+      description: '设备码登录 · OpenAI',
+      codexBin,
+      codexHome,
+      appServerArgs,
+      defaultModel,
+      defaultEffort,
+      skillsRoots,
+    },
+    {
+      id: 'deepseek',
+      label: 'DeepSeek',
+      description: '独立本地配置',
+      codexBin: process.env.CODEX_MOBILE_DEEPSEEK_BIN ?? '/home/ningmengchang/.local/bin/codex-ds',
+      codexHome: deepseekHome,
+      appServerArgs,
+      defaultModel: process.env.CODEX_MOBILE_DEEPSEEK_MODEL ?? 'deepseek-v4-flash',
+      defaultEffort: process.env.CODEX_MOBILE_DEEPSEEK_EFFORT ?? 'high',
+      skillsRoots: deepseekSkillsRoots,
+    },
+  ];
   return {
     host: overrides.host ?? process.env.CODEX_MOBILE_HOST ?? '127.0.0.1',
     port: overrides.port ?? positiveInteger(process.env.CODEX_MOBILE_PORT, 3765),
@@ -48,16 +93,9 @@ export function loadConfig(overrides = {}) {
     allowedRoots: overrides.allowedRoots
       ? overrides.allowedRoots.map((entry) => fs.realpathSync(path.resolve(entry)))
       : loadRoots(process.env.CODEX_MOBILE_ALLOWED_ROOTS),
-    skillsRoots: overrides.skillsRoots
-      ?? (process.env.CODEX_MOBILE_SKILLS_ROOTS
-        ? process.env.CODEX_MOBILE_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
-        : ['/home/ningmengchang/.codex/skills', '/home/ningmengchang/.agents/skills']),
-    codexBin: overrides.codexBin
-      ?? process.env.CODEX_MOBILE_CODEX_BIN
-      ?? (fs.existsSync('/opt/codex-mobile/bin/codex')
-        ? '/opt/codex-mobile/bin/codex'
-        : '/home/ningmengchang/.local/bin/codex'),
-    codexHome: overrides.codexHome ?? process.env.CODEX_HOME ?? '/root/.codex',
+    skillsRoots,
+    codexBin,
+    codexHome,
     sessionTtlSeconds: overrides.sessionTtlSeconds
       ?? positiveInteger(process.env.CODEX_MOBILE_SESSION_TTL_SECONDS, 30 * 24 * 60 * 60),
     artifactTtlSeconds: overrides.artifactTtlSeconds
@@ -66,19 +104,18 @@ export function loadConfig(overrides = {}) {
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_FILE_BYTES, 512 * 1024 * 1024),
     maxBodyBytes: overrides.maxBodyBytes
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_BODY_BYTES, 2 * 1024 * 1024),
-    defaultModel: overrides.defaultModel
-      ?? process.env.CODEX_MOBILE_DEFAULT_MODEL
-      ?? 'gpt-5.6-sol',
-    defaultEffort: overrides.defaultEffort
-      ?? process.env.CODEX_MOBILE_DEFAULT_EFFORT
-      ?? 'max',
+    defaultModel,
+    defaultEffort,
     ownershipHelper: overrides.ownershipHelper
       ?? process.env.CODEX_MOBILE_OWNERSHIP_HELPER
       ?? '/root/.codex/bin/fix-ningmengchang-ownership',
     targetUser: overrides.targetUser ?? process.env.CODEX_MOBILE_TARGET_USER ?? 'ningmengchang',
     targetGroup: overrides.targetGroup ?? process.env.CODEX_MOBILE_TARGET_GROUP ?? 'ningmengchang',
     logLevel: overrides.logLevel ?? process.env.CODEX_MOBILE_LOG_LEVEL ?? 'info',
-    appServerArgs: overrides.appServerArgs ?? ['app-server', '--stdio'],
+    appServerArgs,
+    codexBackends,
+    defaultBackendId: overrides.defaultBackendId ?? process.env.CODEX_MOBILE_DEFAULT_BACKEND ?? 'gpt',
+    backendStatePath: overrides.backendStatePath ?? path.join(dataDir, 'codex-backend.json'),
     home: overrides.home ?? os.homedir(),
     disableAppServer: overrides.disableAppServer ?? false,
   };

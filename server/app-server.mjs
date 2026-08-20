@@ -16,6 +16,7 @@ export class AppServerBridge extends EventEmitter {
     this.starting = null;
     this.stopping = false;
     this.restartTimer = null;
+    this.reconfiguring = null;
   }
 
   status() {
@@ -23,6 +24,7 @@ export class AppServerBridge extends EventEmitter {
       ready: this.ready,
       pid: this.child?.pid ?? null,
       pendingRequests: this.serverRequests.size,
+      switching: Boolean(this.reconfiguring),
     };
   }
 
@@ -86,8 +88,21 @@ export class AppServerBridge extends EventEmitter {
   }
 
   async request(method, params = undefined, timeoutMs = 60_000) {
+    if (this.reconfiguring) await this.reconfiguring;
     await this.start();
     return this.#requestRaw(method, params, timeoutMs);
+  }
+
+  async reconfigure(runtime) {
+    if (this.reconfiguring) return this.reconfiguring;
+    this.reconfiguring = (async () => {
+      if (this.starting) await this.starting.catch(() => {});
+      await this.stop();
+      Object.assign(this.config, runtime);
+      await this.start();
+      return this.status();
+    })().finally(() => { this.reconfiguring = null; });
+    return this.reconfiguring;
   }
 
   #requestRaw(method, params, timeoutMs) {
@@ -151,7 +166,12 @@ export class AppServerBridge extends EventEmitter {
         createdAt: Date.now(),
       };
       this.serverRequests.set(publicId, request);
-      this.emit('serverRequest', { id: publicId, method: request.method, params: request.params });
+      this.emit('serverRequest', {
+        id: publicId,
+        method: request.method,
+        params: request.params,
+        createdAt: request.createdAt,
+      });
       return;
     }
 

@@ -15,6 +15,9 @@ export function normalizeFavorite(value) {
   const updatedAt = Number(value.updatedAt);
   return {
     id: normalizeText(value.id, '会话 ID', 200),
+    backend: typeof value.backend === 'string' && value.backend.trim()
+      ? normalizeText(value.backend, 'Agent', 32).toLowerCase()
+      : 'gpt',
     name: normalizeText(value.name || '未命名会话', '会话名称', 200),
     cwd: normalizeText(value.cwd, '项目目录', 4096),
     updatedAt: Number.isFinite(updatedAt) && updatedAt >= 0 ? updatedAt : Date.now(),
@@ -26,7 +29,8 @@ function uniqueNewest(items, limit) {
   for (const value of items) {
     let item;
     try { item = normalizeFavorite(value); } catch { continue; }
-    if (!unique.has(item.id)) unique.set(item.id, item);
+    const key = `${item.backend}:${item.id}`;
+    if (!unique.has(key)) unique.set(key, item);
   }
   return [...unique.values()]
     .sort((left, right) => right.updatedAt - left.updatedAt)
@@ -53,24 +57,30 @@ export class FavoritesStore {
   #write() {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, data: this.items }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(temporary, `${JSON.stringify({ version: 2, data: this.items }, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, this.filePath);
   }
 
-  list() {
-    return this.items.map((item) => ({ ...item }));
+  list(backend = null) {
+    return this.items
+      .filter((item) => !backend || item.backend === backend)
+      .map((item) => ({ ...item }));
   }
 
   upsert(value) {
     const item = normalizeFavorite(value);
-    this.items = uniqueNewest([item, ...this.items.filter((entry) => entry.id !== item.id)], this.limit);
+    this.items = uniqueNewest([
+      item,
+      ...this.items.filter((entry) => entry.id !== item.id || entry.backend !== item.backend),
+    ], this.limit);
     this.#write();
     return this.list();
   }
 
   import(items) {
-    const existing = new Set(this.items.map((item) => item.id));
-    const additions = uniqueNewest(items, this.limit).filter((item) => !existing.has(item.id));
+    const existing = new Set(this.items.map((item) => `${item.backend}:${item.id}`));
+    const additions = uniqueNewest(items, this.limit)
+      .filter((item) => !existing.has(`${item.backend}:${item.id}`));
     if (additions.length) {
       this.items = uniqueNewest([...this.items, ...additions], this.limit);
       this.#write();
@@ -78,12 +88,12 @@ export class FavoritesStore {
     return this.list();
   }
 
-  rename(id, name) {
+  rename(id, name, backend = 'gpt') {
     const targetId = normalizeText(id, '会话 ID', 200);
     const targetName = normalizeText(name, '会话名称', 200);
     let changed = false;
     this.items = this.items.map((item) => {
-      if (item.id !== targetId || item.name === targetName) return item;
+      if (item.id !== targetId || item.backend !== backend || item.name === targetName) return item;
       changed = true;
       return { ...item, name: targetName, updatedAt: Date.now() };
     });
@@ -91,9 +101,9 @@ export class FavoritesStore {
     return this.list();
   }
 
-  remove(id) {
+  remove(id, backend = 'gpt') {
     const targetId = normalizeText(id, '会话 ID', 200);
-    const next = this.items.filter((item) => item.id !== targetId);
+    const next = this.items.filter((item) => item.id !== targetId || item.backend !== backend);
     if (next.length !== this.items.length) {
       this.items = next;
       this.#write();

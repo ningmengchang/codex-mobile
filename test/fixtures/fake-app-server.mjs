@@ -15,6 +15,10 @@ lines.on('line', (line) => {
     send({ id: message.id, result: message.params });
     return;
   }
+  if (message.method === 'test/env') {
+    send({ id: message.id, result: { codexHome: process.env.CODEX_HOME } });
+    return;
+  }
   if (message.method === 'test/approval') {
     send({ id: 'approval-upstream', method: 'item/commandExecution/requestApproval', params: {
       threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', command: 'pwd', cwd: '/tmp',

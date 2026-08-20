@@ -13,6 +13,7 @@ const publicRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const questionRequest = {
   id: 'req-question-1',
   method: 'item/tool/requestUserInput',
+  createdAt: Date.now(),
   params: {
     threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', autoResolutionMs: 120_000,
     questions: [
@@ -38,6 +39,7 @@ const bootstrap = {
 
 const browser = await chromium.launch({ headless: true });
 let respondBody = null;
+let responded = false;
 try {
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
@@ -71,13 +73,14 @@ try {
     });
     if (pathname === '/api/auth/status') return fulfillJson({ authenticated: true });
     if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
-    if (pathname === '/api/requests') return fulfillJson({ data: [] });
+    if (pathname === '/api/requests') return fulfillJson({ data: responded ? [questionRequest] : [] });
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
     if (pathname === '/api/threads' || /^\/api\/threads\/[^/]+$/.test(pathname)) {
       return fulfillJson({ data: [], thread: { id: 'thread-1', cwd: '/home/ningmengchang', turns: [] } });
     }
     if (/^\/api\/requests\/[^/]+\/respond$/.test(pathname)) {
       respondBody = route.request().postDataJSON();
+      responded = true;
       return fulfillJson({ resolved: true });
     }
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
@@ -137,11 +140,18 @@ try {
   await page.locator('.question-freeform').fill('补充内容');
   await page.locator('.approval-actions button.allow').click();
   await page.locator('.approval-card').waitFor({ state: 'detached' });
+  await page.evaluate(() => {
+    window.__emitApproval();
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.waitForTimeout(300);
+  const repeatedCards = await page.locator('.approval-card').count();
   const screenshot = process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-question.png';
   await page.screenshot({ path: screenshot, fullPage: true });
   if (result.questionCount !== 2) throw new Error(`问题数量异常：${result.questionCount}`);
   if (!result.otherPresent) throw new Error('缺少“其他”输入选项');
   if (validationShown !== 2) throw new Error(`提交校验提示异常：${validationShown}`);
+  if (repeatedCards !== 0) throw new Error(`已提交的交互卡片再次出现：${repeatedCards}`);
   if (result.layout.stackTop > result.layout.viewport * 0.3) {
     throw new Error(`抽屉起点过高，答题区太小：${JSON.stringify(result.layout)}`);
   }
@@ -164,6 +174,7 @@ try {
   }
   result.submittedAnswers = answers;
   result.validationShown = validationShown;
+  result.repeatedCards = repeatedCards;
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } finally {
   await browser.close();

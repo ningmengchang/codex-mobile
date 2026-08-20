@@ -35,6 +35,8 @@ export const state = {
   turns: [],
   activeTurnId: null,
   approvals: new Map(),
+  resolvingApprovalIds: new Set(),
+  resolvedApprovalIds: new Set(),
   artifacts: [],
   artifactsThreadId: null,
   artifactsTotal: 0,
@@ -68,6 +70,7 @@ export const state = {
   currentArtifact: null,
   threadAction: null,
   events: null,
+  backendSwitching: false,
   mode: localStorage.getItem('codex-mobile-mode') === 'plan' ? 'plan' : 'default',
   theme: localStorage.getItem('codex-mobile-theme') === 'light' ? 'light' : 'dark',
   approvalsReviewer: (() => {

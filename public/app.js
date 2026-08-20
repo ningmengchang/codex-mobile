@@ -202,6 +202,25 @@ function toggleFullscreen() {
 
 let uiStateTimer = null;
 
+function activeBackendId() {
+  return state.bootstrap?.backends?.active || 'gpt';
+}
+
+function backendStorageKey(key, backend = activeBackendId()) {
+  return `${key}:${backend}`;
+}
+
+function storedForBackend(key, storage = localStorage) {
+  const scoped = storage.getItem(backendStorageKey(key));
+  if (scoped != null) return scoped;
+  return activeBackendId() === 'gpt' ? storage.getItem(key) : null;
+}
+
+function loadBackendPreferences() {
+  state.model = storedForBackend('codex-mobile-model');
+  state.effort = storedForBackend('codex-mobile-effort');
+}
+
 function isCompactNavigation() {
   return window.matchMedia?.('(max-width: 780px)')?.matches === true;
 }
@@ -233,10 +252,10 @@ function updateNavigationHistory(view, mode = 'none', threadId = state.currentTh
 }
 
 function saveUiState() {
-  if (state.currentThread?.id) localStorage.setItem(UI_STATE.thread, state.currentThread.id);
+  if (state.currentThread?.id) localStorage.setItem(backendStorageKey(UI_STATE.thread), state.currentThread.id);
   const activeTab = document.querySelector('.view.active')?.dataset.view;
   if (activeTab) sessionStorage.setItem(UI_STATE.tab, activeTab);
-  sessionStorage.setItem(UI_STATE.draft, $('#promptInput').value);
+  sessionStorage.setItem(backendStorageKey(UI_STATE.draft), $('#promptInput').value);
 }
 
 function scheduleUiStateSave() {
@@ -245,9 +264,9 @@ function scheduleUiStateSave() {
 }
 
 async function restoreUiState() {
-  const savedThreadId = localStorage.getItem(UI_STATE.thread);
+  const savedThreadId = storedForBackend(UI_STATE.thread);
   const savedTab = sessionStorage.getItem(UI_STATE.tab);
-  const savedDraft = sessionStorage.getItem(UI_STATE.draft) ?? '';
+  const savedDraft = storedForBackend(UI_STATE.draft, sessionStorage) ?? '';
   const route = navigationRoute();
   if (isCompactNavigation()) {
     if (route?.view === 'chat' && route.threadId) {
@@ -275,8 +294,8 @@ async function restoreUiState() {
       const opened = await openThread(savedThreadId, { history: 'none' });
       if (!opened) throw new Error('保存的会话无法恢复');
     } catch {
-      localStorage.removeItem(UI_STATE.thread);
-      sessionStorage.removeItem(UI_STATE.draft);
+      localStorage.removeItem(backendStorageKey(UI_STATE.thread));
+      sessionStorage.removeItem(backendStorageKey(UI_STATE.draft));
     }
   }
   const activeView = document.querySelector('.view.active')?.dataset.view;
@@ -314,7 +333,10 @@ async function initialize() {
 async function loadBootstrap() {
   setConnection('connecting', '连接中');
   state.bootstrap = await api('/api/bootstrap');
-  const runtimeParts = [state.bootstrap.runtime.user, 'SSH'];
+  loadBackendPreferences();
+  renderBackends();
+  const activeBackend = state.bootstrap.backends?.data?.find((item) => item.id === activeBackendId());
+  const runtimeParts = [activeBackend?.label || activeBackendId(), state.bootstrap.runtime.user, 'SSH'];
   if (state.bootstrap.runtime.codexHome) runtimeParts.push(state.bootstrap.runtime.codexHome);
   $('#settingsRuntime').textContent = runtimeParts.join(' · ');
   setConnection(state.bootstrap.appServer.ready ? 'online' : 'connecting', state.bootstrap.appServer.ready ? '已连接' : 'Codex 启动中');
@@ -333,6 +355,22 @@ async function loadBootstrap() {
     threadsPromise: loadThreads(),
     favoritesPromise: loadFavoriteThreads(state.bootstrap.favorites),
   };
+}
+
+function renderBackends() {
+  const select = $('#backendSelect');
+  if (!select) return;
+  select.replaceChildren();
+  const backends = state.bootstrap?.backends?.data ?? [];
+  for (const backend of backends) {
+    const label = backend.description ? `${backend.label} · ${backend.description}` : backend.label;
+    const option = new Option(label, backend.id);
+    option.disabled = backend.available === false;
+    select.add(option);
+  }
+  if (!backends.length) select.add(new Option('GPT', 'gpt'));
+  select.value = activeBackendId();
+  select.disabled = state.backendSwitching || backends.filter((item) => item.available).length < 2;
 }
 
 async function loadRuntimeCatalogs() {
@@ -370,7 +408,7 @@ function renderModels() {
 
   if (availableModelIds.size && state.model && !savedModelAvailable) {
     state.model = null;
-    localStorage.removeItem('codex-mobile-model');
+    localStorage.removeItem(backendStorageKey('codex-mobile-model'));
   }
 
   const selectedModel = savedModelAvailable ? state.model : catalogDefault;
@@ -1043,6 +1081,21 @@ function applyThreadActivity(activity, options = {}) {
     renderPlanDecision();
   }
   if (options.render !== false) renderThreads();
+}
+
+function notifyNativeThreadActivity(activity, previous, isLive) {
+  if (!isLive || !previous?.status || previous.status === activity.status || activity.status === 'idle') return;
+  const bridge = window.CodexNativeNotifications;
+  if (!bridge?.threadStatusChanged) return;
+  const thread = state.threads.find((item) => item.id === activity.threadId)
+    ?? state.favoriteThreads.find((item) => item.id === activity.threadId)
+    ?? (state.currentThread?.id === activity.threadId ? state.currentThread : null);
+  const name = thread?.name || thread?.preview || 'Codex 会话';
+  try {
+    bridge.threadStatusChanged(activity.threadId, name, activity.status);
+  } catch (error) {
+    debug.log('native-notification', 'failed', { message: error?.message ?? String(error) });
+  }
 }
 
 function hydrateThreadActivities(threads) {
@@ -2003,6 +2056,7 @@ function renderApprovals() {
   const chatActive = document.querySelector('.view.active')?.dataset.view === 'chat';
   const requests = [...state.approvals.values()].filter((request) => {
     if (!chatActive || !state.currentThread) return false;
+    if (state.resolvingApprovalIds.has(request.id) || state.resolvedApprovalIds.has(request.id)) return false;
     const threadId = approvalThreadId(request);
     return !threadId || threadId === state.currentThread.id;
   });
@@ -2067,8 +2121,10 @@ function actionButton(label, action, primary = false) {
 }
 
 async function respondApproval(request, action, card) {
+  if (state.resolvingApprovalIds.has(request.id) || state.resolvedApprovalIds.has(request.id)) return;
+  let body;
   try {
-    const body = { action };
+    body = { action };
     if (action === 'answer') {
       const answers = {};
       let valid = true;
@@ -2092,21 +2148,42 @@ async function respondApproval(request, action, card) {
       body.answers = answers;
     }
     card.querySelectorAll('button, input, textarea').forEach((element) => { element.disabled = true; });
-    await post(`/api/requests/${encodeURIComponent(request.id)}/respond`, body);
+    state.resolvingApprovalIds.add(request.id);
     state.approvals.delete(request.id);
+    renderApprovals();
+    await post(`/api/requests/${encodeURIComponent(request.id)}/respond`, body);
+    state.resolvingApprovalIds.delete(request.id);
+    rememberResolvedApproval(request.id);
     renderApprovals();
     toast(action === 'decline' ? '已拒绝' : '已提交');
   } catch (error) {
-    card.querySelectorAll('button, input, textarea').forEach((element) => { element.disabled = false; });
+    state.resolvingApprovalIds.delete(request.id);
+    if (!state.resolvedApprovalIds.has(request.id)) state.approvals.set(request.id, request);
+    renderApprovals();
     toast(error.message, 'error');
   }
 }
 
+function rememberResolvedApproval(requestId) {
+  if (!requestId) return;
+  state.resolvedApprovalIds.add(requestId);
+  while (state.resolvedApprovalIds.size > 256) {
+    state.resolvedApprovalIds.delete(state.resolvedApprovalIds.values().next().value);
+  }
+}
+
 async function syncPendingRequests() {
+  const startedAt = Date.now();
   const result = await api('/api/requests');
-  const fresh = new Map((result.data ?? []).map((request) => [request.id, request]));
+  const fresh = new Map((result.data ?? [])
+    .filter((request) => !state.resolvingApprovalIds.has(request.id) && !state.resolvedApprovalIds.has(request.id))
+    .map((request) => [request.id, request]));
   for (const [id, request] of state.approvals) {
-    if (!fresh.has(id)) fresh.set(id, request);
+    const arrivedDuringSync = Number(request.createdAt) >= startedAt;
+    if (arrivedDuringSync && !fresh.has(id)
+        && !state.resolvingApprovalIds.has(id) && !state.resolvedApprovalIds.has(id)) {
+      fresh.set(id, request);
+    }
   }
   state.approvals = fresh;
   renderApprovals();
@@ -2912,6 +2989,13 @@ function connectEvents() {
     const status = JSON.parse(event.data);
     setConnection(status.ready ? 'online' : 'connecting', status.ready ? '已连接' : 'Codex 重启中');
   });
+  events.addEventListener('backend-changed', (event) => {
+    const data = JSON.parse(event.data);
+    if (state.backendSwitching || !data.active || data.active === activeBackendId()) return;
+    showStartup('Agent 已切换，正在刷新会话…');
+    state.events?.close();
+    setTimeout(() => window.location.reload(), 80);
+  });
   events.addEventListener('bridge-error', (event) => toast(JSON.parse(event.data).message, 'error'));
   events.addEventListener('favorites', (event) => {
     setFavoriteThreads(JSON.parse(event.data).data);
@@ -2923,6 +3007,7 @@ function connectEvents() {
     applyThreadActivity(activity);
     const eventAt = Date.parse(activity.at ?? '');
     const isLive = !Number.isFinite(eventAt) || eventAt >= subscribedAt - 1000;
+    notifyNativeThreadActivity(activity, previous, isLive);
     const becameTerminal = ['completed', 'failed', 'interrupted'].includes(activity.status)
       && !['completed', 'failed', 'interrupted'].includes(previous?.status);
     if (isLive && becameTerminal && activity.threadId !== state.currentThread?.id) {
@@ -2936,6 +3021,7 @@ function connectEvents() {
   events.addEventListener('codex', (event) => handleCodex(JSON.parse(event.data)));
   events.addEventListener('approval', (event) => {
     const request = JSON.parse(event.data);
+    if (state.resolvingApprovalIds.has(request.id) || state.resolvedApprovalIds.has(request.id)) return;
     state.approvals.set(request.id, request);
     const threadId = approvalThreadId(request);
     const currentActivity = threadId ? state.threadRuntimeById.get(threadId) : null;
@@ -2962,6 +3048,8 @@ function connectEvents() {
   events.addEventListener('approval-resolved', (event) => {
     const data = JSON.parse(event.data);
     const request = state.approvals.get(data.id);
+    rememberResolvedApproval(data.id);
+    state.resolvingApprovalIds.delete(data.id);
     state.approvals.delete(data.id);
     const threadId = approvalThreadId(request);
     const activity = threadId ? state.threadRuntimeById.get(threadId) : null;
@@ -3092,13 +3180,46 @@ $('#approvalReviewerSelect').addEventListener('change', (event) => {
 $('#themeSelect').addEventListener('change', (event) => {
   applyTheme(event.target.value, { persist: true, rerender: true });
 });
+$('#backendSelect').addEventListener('change', async (event) => {
+  const targetId = event.target.value;
+  const currentId = activeBackendId();
+  const target = state.bootstrap?.backends?.data?.find((item) => item.id === targetId);
+  if (!target || targetId === currentId) return;
+  if (!window.confirm(`切换到 ${target.label}？\n\n两套 Agent 的登录和历史会话会保持隔离。`)) {
+    event.target.value = currentId;
+    return;
+  }
+  state.backendSwitching = true;
+  renderModeControls();
+  showStartup(`正在切换到 ${target.label}…`);
+  try {
+    try {
+      await post('/api/runtime/backend', { id: targetId });
+    } catch (error) {
+      if (error.code !== 'BACKEND_BUSY'
+          || !window.confirm(`当前还有 ${error.data?.activeThreads?.length ?? ''} 个任务未结束。\n\n仍要切换并中断这些任务吗？`)) {
+        throw error;
+      }
+      await post('/api/runtime/backend', { id: targetId, force: true });
+    }
+    state.events?.close();
+    history.replaceState({ codexMobile: true, view: 'threads' }, '', '#threads');
+    window.location.reload();
+  } catch (error) {
+    state.backendSwitching = false;
+    showApp();
+    renderBackends();
+    renderModeControls();
+    toast(error.message, 'error');
+  }
+});
 $('#modelSelect').addEventListener('change', (event) => {
   state.model = event.target.value;
-  localStorage.setItem('codex-mobile-model', state.model);
+  localStorage.setItem(backendStorageKey('codex-mobile-model'), state.model);
 });
 $('#effortSelect').addEventListener('change', (event) => {
   state.effort = event.target.value;
-  localStorage.setItem('codex-mobile-effort', state.effort);
+  localStorage.setItem(backendStorageKey('codex-mobile-effort'), state.effort);
 });
 $('#refinePlanButton').addEventListener('click', refinePlan);
 $('#executePlanButton').addEventListener('click', executePlan);

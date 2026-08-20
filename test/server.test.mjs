@@ -19,6 +19,7 @@ class FakeBridge extends EventEmitter {
     this.nextThreadId = null;
     this.threadList = [];
     this.threadListNextCursor = null;
+    this.reconfigurations = [];
   }
   status() { return { ready: true, pid: 123, pendingRequests: 0 }; }
   getServerRequests() {
@@ -29,6 +30,10 @@ class FakeBridge extends EventEmitter {
     this.serverRequests.delete(publicId);
     this.responses.push({ id: publicId, result });
     this.emit('serverRequestResolved', { id: publicId, method: request?.method });
+  }
+  async reconfigure(runtime) {
+    this.reconfigurations.push(runtime);
+    return this.status();
   }
   async request(method, params) {
     this.calls.push({ method, params });
@@ -119,6 +124,18 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     ownershipHelper: '/bin/true', logLevel: 'silent',
     defaultModel: 'pinned-model', defaultEffort: 'max',
     skillsRoots: [skillsRoot],
+    codexBackends: [
+      {
+        id: 'gpt', label: 'GPT', available: true, codexBin: '/bin/true', codexHome: '/root/.codex',
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'pinned-model', defaultEffort: 'max',
+        skillsRoots: [skillsRoot],
+      },
+      {
+        id: 'deepseek', label: 'DeepSeek', available: true, codexBin: '/bin/true', codexHome: path.join(directory, '.codex-ds'),
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'deepseek-v4-flash', defaultEffort: 'high',
+        skillsRoots: [skillsRoot],
+      },
+    ],
   };
   const rendered = [];
   const bridge = new FakeBridge();
@@ -200,11 +217,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   try {
-    const appScript = await fetch(`${base}/app.js?v=102`);
+    const appScript = await fetch(`${base}/app.js?v=106`);
     assert.equal(appScript.status, 200);
     assert.equal(appScript.headers.get('cache-control'), 'no-cache');
     const appShell = await fetch(`${base}/`);
-    assert.equal((await appShell.text()).includes('/app.js?v=102'), true);
+    assert.equal((await appShell.text()).includes('/app.js?v=106'), true);
     const denied = await fetch(`${base}/api/bootstrap`);
     assert.equal(denied.status, 401);
     const pairing = createPairingCode(config);
@@ -220,6 +237,8 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(payload.defaultModel, 'pinned-model');
     assert.equal(payload.defaultEffort, 'max');
     assert.deepEqual(payload.favorites, []);
+    assert.equal(payload.backends.active, 'gpt');
+    assert.deepEqual(payload.backends.data.map((item) => item.id), ['gpt', 'deepseek']);
     assert.equal(typeof payload.catalogsReady, 'boolean');
     const catalogs = await fetch(`${base}/api/catalogs`, { headers: { Cookie: cookie } });
     assert.equal(catalogs.status, 200);
@@ -408,10 +427,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(planCall.params.approvalPolicy, 'never');
     assert.equal(planCall.params.approvalsReviewer, 'user');
     assert.deepEqual(planCall.params.sandboxPolicy, { type: 'readOnly', networkAccess: false });
-    assert.deepEqual(planCall.params.collaborationMode, {
-      mode: 'plan',
-      settings: { model: 'pinned-model', reasoning_effort: 'max', developer_instructions: null },
-    });
+    assert.equal(planCall.params.collaborationMode.mode, 'plan');
+    assert.equal(planCall.params.collaborationMode.settings.model, 'pinned-model');
+    assert.equal(planCall.params.collaborationMode.settings.reasoning_effort, 'max');
+    assert.match(planCall.params.collaborationMode.settings.developer_instructions, /每个用户回合最多调用一次 request_user_input/);
+    assert.match(planCall.params.collaborationMode.settings.developer_instructions, /同一用户回合不得再次调用 request_user_input/);
     bridge.threadList = [{
       id: 'thread-1', cwd: project, name: '并行测试', preview: '正在规划', status: { type: 'active' }, updatedAt: 3,
     }];
@@ -627,9 +647,9 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const directoryMeta = await fetch(`${base}/api/artifacts/${directoryToken}/meta`, { headers: { Cookie: cookie } });
     assert.equal(directoryMeta.status, 200);
     assert.equal((await directoryMeta.json()).fileKind, 'directory');
-    const directory = await fetch(`${base}/api/artifacts/${directoryToken}/directory`, { headers: { Cookie: cookie } });
-    assert.equal(directory.status, 200);
-    const directoryBody = await directory.json();
+    const directoryResponse = await fetch(`${base}/api/artifacts/${directoryToken}/directory`, { headers: { Cookie: cookie } });
+    assert.equal(directoryResponse.status, 200);
+    const directoryBody = await directoryResponse.json();
     assert.equal(directoryBody.data[0].name, '最终报告.md');
     assert.equal(directoryBody.data[0].fileKind, 'markdown');
     assert.equal(directoryBody.parent.name, 'demo');
@@ -699,6 +719,28 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const worksheet = await fetch(`${base}/api/artifacts/${spreadsheetToken}/workbook/sheets/0`, { headers: { Cookie: cookie } });
     assert.equal(worksheet.status, 200);
     assert.equal((await worksheet.json()).renderedRows, 2);
+    const backends = await fetch(`${base}/api/runtime/backends`, { headers: { Cookie: cookie } });
+    assert.equal(backends.status, 200);
+    assert.equal((await backends.json()).active, 'gpt');
+    const switched = await fetch(`${base}/api/runtime/backend`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'deepseek', force: true }),
+    });
+    assert.equal(switched.status, 200);
+    const switchedBody = await switched.json();
+    assert.equal(switchedBody.active, 'deepseek');
+    assert.equal(switchedBody.defaultModel, 'deepseek-v4-flash');
+    assert.equal(app.backendManager.activeId(), 'deepseek');
+    assert.equal(app.config.codexHome, path.join(directory, '.codex-ds'));
+    assert.equal(bridge.reconfigurations.at(-1).defaultModel, 'deepseek-v4-flash');
+    const persistedBackend = JSON.parse(fs.readFileSync(path.join(dataDir, 'codex-backend.json'), 'utf8'));
+    assert.equal(persistedBackend.active, 'deepseek');
+    const switchedBack = await fetch(`${base}/api/runtime/backend`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'gpt', force: true }),
+    });
+    assert.equal(switchedBack.status, 200);
+    assert.equal((await switchedBack.json()).active, 'gpt');
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
     app.hub.close();

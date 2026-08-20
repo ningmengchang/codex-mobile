@@ -17,6 +17,13 @@ test('bridge initializes, correlates responses, and resolves server requests', a
     await bridge.start();
     assert.equal(bridge.status().ready, true);
     assert.deepEqual(await bridge.request('test/echo', { value: 42 }), { value: 42 });
+    await bridge.reconfigure({
+      codexBin: process.execPath,
+      appServerArgs: [FIXTURE],
+      codexHome: '/tmp/codex-mobile-second-home',
+    });
+    assert.equal(bridge.status().ready, true);
+    assert.deepEqual(await bridge.request('test/env'), { codexHome: '/tmp/codex-mobile-second-home' });
     const requestEvent = once(bridge, 'serverRequest');
     await bridge.request('test/approval');
     const [request] = await requestEvent;

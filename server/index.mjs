@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AppServerBridge, approvalResponse } from './app-server.mjs';
 import { ArtifactTracker } from './artifacts.mjs';
+import { createCodexBackendManager } from './codex-backends.mjs';
 import { createConversationArtifacts } from './conversation-artifacts.mjs';
 import { clearSessionCookie, COOKIE_NAME, exchangePairingCode, requireSession, sessionCookie } from './auth.mjs';
 import { loadConfig } from './config.mjs';
@@ -69,6 +70,11 @@ const MAX_DOCUMENT_PREVIEW_PAGES = 300;
 const TURN_MODES = new Set(['default', 'plan']);
 const APPROVAL_REVIEWERS = new Set(['auto_review', 'user', 'never']);
 const EXECUTE_MODE_INSTRUCTIONS = '执行模式：直接实施用户的请求，不要先输出完整方案或规划；除非用户明确要求方案/设计/规划，才先设计方案。';
+const PLAN_MODE_INSTRUCTIONS = [
+  '规划模式交互规则：先通过只读检查解决可发现的问题，只询问会实质改变方案且无法从上下文推断的决策。',
+  '每个用户回合最多调用一次 request_user_input，并把最多三个最关键的问题集中在同一张交互卡片中；不要把实现细节拆成连续多轮卡片。',
+  '用户提交回答后，直接形成完整方案。其余未确认细节采用推荐默认值，并在方案中明确记录假设；同一用户回合不得再次调用 request_user_input。',
+].join('\n');
 
 function json(response, statusCode, body, headers = {}) {
   const payload = Buffer.from(JSON.stringify(body));
@@ -174,7 +180,7 @@ function validateProject(candidate, config) {
   return project;
 }
 
-function favoriteInput(value, config) {
+function favoriteInput(value, config, backend = 'gpt') {
   if (!value || typeof value !== 'object') throw new AppError('收藏内容无效。', 400, 'INVALID_FAVORITE');
   const id = typeof value.id === 'string' ? value.id.trim() : '';
   const name = typeof value.name === 'string' ? value.name.trim() : '';
@@ -185,6 +191,7 @@ function favoriteInput(value, config) {
   if (!cwd) throw new AppError('收藏缺少项目目录。', 400, 'FAVORITE_CWD_REQUIRED');
   return {
     id,
+    backend,
     name: name || '未命名会话',
     cwd: validateProject(cwd, config),
     updatedAt: Number.isFinite(Number(value.updatedAt)) ? Math.max(0, Number(value.updatedAt)) : Date.now(),
@@ -387,7 +394,7 @@ function turnSettings(body, cwd, catalogs, config) {
       settings: {
         model,
         reasoning_effort: effort,
-        developer_instructions: executionMode ? EXECUTE_MODE_INSTRUCTIONS : null,
+        developer_instructions: executionMode ? EXECUTE_MODE_INSTRUCTIONS : PLAN_MODE_INSTRUCTIONS,
       },
     },
     sandboxPolicy: mode === 'plan'
@@ -440,6 +447,7 @@ function wireBridge(bridge, tracker, threadActivity, hub, config) {
 export function createCodexMobileServer(options = {}) {
   const config = options.config ?? loadConfig(options.configOverrides);
   const hub = options.hub ?? new EventHub();
+  const backendManager = options.backendManager ?? createCodexBackendManager(config);
   const bridge = options.bridge ?? new AppServerBridge(config);
   const tracker = options.tracker ?? new ArtifactTracker(config, hub);
   const dingtalk = options.dingtalk ?? createDingTalk(config);
@@ -469,6 +477,7 @@ export function createCodexMobileServer(options = {}) {
     collaborationModes: [],
     refreshedAt: 0,
     refreshPromise: null,
+    generation: 0,
   };
   const catalogPayload = () => ({
     account: catalogs.account,
@@ -485,20 +494,31 @@ export function createCodexMobileServer(options = {}) {
     const fresh = catalogs.refreshedAt && Date.now() - catalogs.refreshedAt < 10 * 60 * 1000;
     if (!force && fresh) return Promise.resolve(catalogPayload());
     if (catalogs.refreshPromise) return catalogs.refreshPromise;
-    catalogs.refreshPromise = Promise.all([
+    const generation = catalogs.generation;
+    const refresh = Promise.all([
       bridge.request('account/read', { refreshToken: false }).catch((error) => ({ error: error.message })),
       bridge.request('model/list', { limit: 100, includeHidden: false }).catch(() => ({ data: [] })),
       bridge.request('collaborationMode/list', {}).catch(() => ({ data: [] })),
     ]).then(([account, models, collaborationModes]) => {
+      if (generation !== catalogs.generation) return catalogPayload();
       catalogs.account = account;
       catalogs.models = models?.data ?? [];
       catalogs.collaborationModes = collaborationModes?.data ?? [];
       catalogs.refreshedAt = Date.now();
       return catalogPayload();
     }).finally(() => {
-      catalogs.refreshPromise = null;
+      if (catalogs.refreshPromise === refresh) catalogs.refreshPromise = null;
     });
-    return catalogs.refreshPromise;
+    catalogs.refreshPromise = refresh;
+    return refresh;
+  };
+  const clearCatalogs = () => {
+    catalogs.generation += 1;
+    catalogs.account = null;
+    catalogs.models = [];
+    catalogs.collaborationModes = [];
+    catalogs.refreshedAt = 0;
+    catalogs.refreshPromise = null;
   };
   const threadMeta = new Map();
   const rememberThread = (thread, fallbackCwd = null) => {
@@ -513,9 +533,60 @@ export function createCodexMobileServer(options = {}) {
       updatedAt: thread.updatedAt ?? previous.updatedAt,
     });
   };
-  const publishFavorites = (data = favorites.list()) => {
+  const activeFavorites = () => favorites.list(backendManager.activeId());
+  const publishFavorites = (data = activeFavorites()) => {
     hub.publish('favorites', { data });
     return data;
+  };
+  let backendSwitchPromise = null;
+  const switchCodexBackend = async (id, { force = false } = {}) => {
+    const target = backendManager.get(id);
+    if (!target) throw new AppError('没有找到这个 Agent。', 404, 'BACKEND_NOT_FOUND');
+    if (!target.available) throw new AppError(`${target.label} 当前不可用。`, 503, 'BACKEND_UNAVAILABLE');
+    if (target.id === backendManager.activeId()) {
+      return { backends: backendManager.payload(), ...catalogPayload(), appServer: bridge.status() };
+    }
+    if (backendSwitchPromise) throw new AppError('Agent 正在切换，请稍候。', 409, 'BACKEND_SWITCHING');
+    const activeActivities = threadActivity.list()
+      .filter((activity) => ['running', 'planning', 'waiting'].includes(activity.status));
+    if (activeActivities.length && !force) {
+      const error = new AppError('仍有会话正在执行或等待确认，切换会中断这些任务。', 409, 'BACKEND_BUSY');
+      error.data = { activeThreads: activeActivities.map((activity) => activity.threadId) };
+      throw error;
+    }
+    const previousId = backendManager.activeId();
+    const previousRuntime = backendManager.runtime(previousId);
+    const nextRuntime = backendManager.runtime(target.id);
+    backendSwitchPromise = (async () => {
+      await tracker.finishAll();
+      try {
+        if (typeof bridge.reconfigure !== 'function') throw new Error('当前 App Server 不支持运行时切换。');
+        await bridge.reconfigure(nextRuntime);
+        backendManager.apply(target.id);
+      } catch (error) {
+        try {
+          await bridge.reconfigure(previousRuntime);
+          backendManager.apply(previousId, { persist: false });
+        } catch (rollbackError) {
+          log(config, 'error', 'unable to roll back Codex backend', rollbackError.stack ?? rollbackError.message);
+        }
+        throw new AppError(`切换到 ${target.label} 失败：${error.message}`, 502, 'BACKEND_SWITCH_FAILED');
+      }
+      for (const activity of activeActivities) {
+        threadActivity.complete(activity.threadId, activity.activeTurnId, 'interrupted');
+      }
+      threadActivity.syncRequests([]);
+      threadMeta.clear();
+      rolloutHistory.clear?.();
+      conversationArtifacts.clear?.();
+      clearCatalogs();
+      const payload = { backends: backendManager.payload(), active: target.id };
+      hub.publish('backend-changed', payload);
+      publishFavorites();
+      const refreshed = await refreshCatalogs(true);
+      return { ...payload, ...refreshed, appServer: bridge.status() };
+    })().finally(() => { backendSwitchPromise = null; });
+    return backendSwitchPromise;
   };
   if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config);
 
@@ -527,7 +598,7 @@ export function createCodexMobileServer(options = {}) {
       pathname = url.pathname;
       if ((request.method === 'GET' || request.method === 'HEAD') && serveStatic(request, response, pathname)) return;
       if (request.method === 'GET' && pathname === '/healthz') {
-        json(response, 200, { status: 'ok', appServer: bridge.status() });
+        json(response, 200, { status: 'ok', appServer: bridge.status(), backend: backendManager.activeId() });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/auth/status') {
@@ -559,8 +630,18 @@ export function createCodexMobileServer(options = {}) {
       requireSession(request, config);
       if (!['GET', 'HEAD'].includes(request.method)) assertSameOrigin(request);
 
+      if (request.method === 'GET' && pathname === '/api/runtime/backends') {
+        json(response, 200, backendManager.payload());
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/runtime/backend') {
+        const body = await readBody(request, config.maxBodyBytes);
+        json(response, 200, await switchCodexBackend(body.id, { force: body.force === true }));
+        return;
+      }
+
       if (request.method === 'GET' && pathname === '/api/favorites') {
-        json(response, 200, { data: favorites.list() });
+        json(response, 200, { data: activeFavorites() });
         return;
       }
       if (request.method === 'POST' && pathname === '/api/favorites/import') {
@@ -568,21 +649,24 @@ export function createCodexMobileServer(options = {}) {
         if (!Array.isArray(body.items)) throw new AppError('收藏列表格式不正确。', 400, 'INVALID_FAVORITES');
         const imported = [];
         for (const item of body.items.slice(0, 50)) {
-          try { imported.push(favoriteInput(item, config)); } catch (error) {
+          try { imported.push(favoriteInput(item, config, backendManager.activeId())); } catch (error) {
             if (!(error instanceof AppError)) throw error;
           }
         }
-        json(response, 200, { data: publishFavorites(favorites.import(imported)) });
+        favorites.import(imported);
+        json(response, 200, { data: publishFavorites() });
         return;
       }
       if (request.method === 'POST' && pathname === '/api/favorites') {
         const body = await readBody(request, config.maxBodyBytes);
-        json(response, 200, { data: publishFavorites(favorites.upsert(favoriteInput(body, config))) });
+        favorites.upsert(favoriteInput(body, config, backendManager.activeId()));
+        json(response, 200, { data: publishFavorites() });
         return;
       }
       const favoriteMatch = routeMatch(pathname, /^\/api\/favorites\/([^/]+)$/);
       if (request.method === 'DELETE' && favoriteMatch) {
-        json(response, 200, { data: publishFavorites(favorites.remove(favoriteMatch[0])) });
+        favorites.remove(favoriteMatch[0], backendManager.activeId());
+        json(response, 200, { data: publishFavorites() });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/skills') {
@@ -647,7 +731,8 @@ export function createCodexMobileServer(options = {}) {
           appServer: bridge.status(),
           pendingRequests,
           threadActivities: threadActivity.list(),
-          favorites: favorites.list(),
+          favorites: activeFavorites(),
+          backends: backendManager.payload(),
           projects: listProjects(config),
           runtime: {
             user: (() => { try { return os.userInfo().username; } catch { return config.targetUser; } })(),
@@ -757,7 +842,10 @@ export function createCodexMobileServer(options = {}) {
         if (!name) throw new AppError('会话名称不能为空。', 400, 'NAME_REQUIRED');
         if (name.length > 100) throw new AppError('会话名称过长。', 400, 'NAME_TOO_LONG');
         const result = await bridge.request('thread/name/set', { threadId: match[0], name });
-        if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.rename(match[0], name));
+        if (activeFavorites().some((item) => item.id === match[0])) {
+          favorites.rename(match[0], name, backendManager.activeId());
+          publishFavorites();
+        }
         json(response, 200, { ...result, thread: threadActivity.attach(result.thread) });
         return;
       }
@@ -766,7 +854,10 @@ export function createCodexMobileServer(options = {}) {
         const result = await bridge.request('thread/delete', { threadId: match[0] });
         threadMeta.delete(match[0]);
         threadActivity.remove(match[0]);
-        if (favorites.list().some((item) => item.id === match[0])) publishFavorites(favorites.remove(match[0]));
+        if (activeFavorites().some((item) => item.id === match[0])) {
+          favorites.remove(match[0], backendManager.activeId());
+          publishFavorites();
+        }
         json(response, 200, { deleted: true, result });
         return;
       }
@@ -1136,7 +1227,10 @@ export function createCodexMobileServer(options = {}) {
     }
   });
 
-  return { server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity, conversationArtifacts };
+  return {
+    server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity,
+    conversationArtifacts, backendManager,
+  };
 }
 
 const isMain = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;

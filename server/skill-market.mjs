@@ -29,7 +29,6 @@ function extractItems(payload) {
 export function createSkillMarket(config, options = {}) {
   const exec = options.exec ?? execFileAsync;
   const scriptsDir = options.scriptsDir ?? process.env.CODEX_MOBILE_SKILL_INSTALLER_SCRIPTS ?? DEFAULT_SCRIPTS_DIR;
-  const codexHome = config.codexHome ?? process.env.CODEX_HOME ?? '/home/ningmengchang/.codex';
   const home = config.home ?? process.env.HOME ?? '/home/ningmengchang';
   const fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
   const communityCache = { at: 0, items: [] };
@@ -38,7 +37,11 @@ export function createSkillMarket(config, options = {}) {
   async function run(args) {
     const { stdout } = await exec('python3', args, {
       cwd: scriptsDir,
-      env: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+      env: {
+        ...process.env,
+        HOME: home,
+        CODEX_HOME: config.codexHome ?? process.env.CODEX_HOME ?? '/home/ningmengchang/.codex',
+      },
       encoding: 'utf8',
       timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
@@ -83,7 +86,7 @@ export function createSkillMarket(config, options = {}) {
     const names = new Set();
     const roots = config.skillsRoots?.length
       ? config.skillsRoots
-      : [path.join(codexHome, 'skills')];
+      : [path.join(config.codexHome ?? process.env.CODEX_HOME ?? '/home/ningmengchang/.codex', 'skills')];
     for (const root of roots) {
       let entries = [];
       try {
@@ -257,7 +260,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
 `;
       const { stdout } = await exec('python3', ['-c', script, zipPath], {
         cwd: scriptsDir,
-        env: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+        env: {
+          ...process.env,
+          HOME: home,
+          CODEX_HOME: config.codexHome ?? process.env.CODEX_HOME ?? '/home/ningmengchang/.codex',
+        },
         encoding: 'utf8',
         timeout: 60_000,
         maxBuffer: 10 * 1024 * 1024,
