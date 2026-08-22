@@ -24,6 +24,11 @@ test('bridge initializes, correlates responses, and resolves server requests', a
     });
     assert.equal(bridge.status().ready, true);
     assert.deepEqual(await bridge.request('test/env'), { codexHome: '/tmp/codex-mobile-second-home' });
+    const previousPid = bridge.status().pid;
+    await bridge.restart();
+    assert.equal(bridge.status().ready, true);
+    assert.notEqual(bridge.status().pid, previousPid);
+    assert.deepEqual(await bridge.request('test/env'), { codexHome: '/tmp/codex-mobile-second-home' });
     const requestEvent = once(bridge, 'serverRequest');
     await bridge.request('test/approval');
     const [request] = await requestEvent;

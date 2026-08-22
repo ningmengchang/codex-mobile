@@ -105,6 +105,17 @@ export class AppServerBridge extends EventEmitter {
     return this.reconfiguring;
   }
 
+  async restart() {
+    if (this.reconfiguring) return this.reconfiguring;
+    this.reconfiguring = (async () => {
+      if (this.starting) await this.starting.catch(() => {});
+      await this.stop();
+      await this.start();
+      return this.status();
+    })().finally(() => { this.reconfiguring = null; });
+    return this.reconfiguring;
+  }
+
   #requestRaw(method, params, timeoutMs) {
     if (!this.child?.stdin?.writable) return Promise.reject(new Error('Codex App Server 未运行。'));
     const id = `mobile:${++this.counter}`;

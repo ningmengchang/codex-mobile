@@ -15,7 +15,7 @@
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=83">
+  <link rel="stylesheet" href="/styles.css?v=85">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -183,6 +183,13 @@
     <div class="settings-body">
       <div id="modeNotice" class="mode-notice" role="status"></div>
       <label><span>Agent</span><select id="backendSelect" aria-label="Codex Agent"></select></label>
+      <section class="account-quota" aria-labelledby="accountQuotaTitle">
+        <div class="account-quota-head">
+          <div><strong id="accountQuotaTitle">使用额度</strong><small id="accountQuotaPlan"></small></div>
+          <button id="refreshAccountStatusButton" type="button">刷新</button>
+        </div>
+        <div id="accountQuotaList" class="account-quota-list"><p class="account-quota-empty">打开设置后自动读取</p></div>
+      </section>
       <label><span>模型</span><select id="modelSelect" aria-label="模型"></select></label>
       <label><span>强度</span><select id="effortSelect" aria-label="推理强度">
         <option value="low">Low</option><option value="medium">Medium</option>
@@ -233,6 +240,7 @@
     <header><strong>会话操作</strong><button id="closeThreadActionButton" class="icon-button" aria-label="关闭">×</button></header>
     <div class="settings-body">
       <button id="threadArtifactsAction" type="button" class="thread-action-row" hidden>查看文档</button>
+      <button id="threadCopyAction" type="button" class="thread-action-row">复制到其他目录</button>
       <button id="threadRenameAction" type="button" class="thread-action-row">重命名</button>
       <button id="threadDeleteAction" type="button" class="thread-action-row danger">删除会话</button>
       <div id="threadDeleteConfirm" hidden>
@@ -241,6 +249,24 @@
           <button id="threadDeleteCancel" type="button">取消</button>
           <button id="threadDeleteOk" type="button" class="button danger">确认删除</button>
         </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="threadCopyDialog" class="settings-dialog thread-copy-dialog">
+    <header><strong>复制会话</strong><button id="closeThreadCopyButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body thread-copy-body">
+      <p id="threadCopySource" class="thread-copy-source"></p>
+      <label><span>副本名称</span><input id="threadCopyName" type="text" maxlength="100" autocomplete="off"></label>
+      <div class="thread-copy-target-head">
+        <div><small>目标目录</small><p id="threadCopyPath" class="file-dialog-path"></p></div>
+        <button id="threadCopyUpButton" type="button" class="button" aria-label="返回上级目录">上一级</button>
+      </div>
+      <div id="threadCopyDirectoryList" class="thread-copy-directory-list"></div>
+      <p id="threadCopyStatus" class="thread-copy-status"></p>
+      <div class="thread-confirm-actions">
+        <button id="cancelThreadCopyButton" type="button">取消</button>
+        <button id="confirmThreadCopyButton" type="button" class="button primary">复制并打开</button>
       </div>
     </div>
   </dialog>
@@ -313,6 +339,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=106"></script>
+  <script type="module" src="/app.js?v=110"></script>
 </body>
 </html>

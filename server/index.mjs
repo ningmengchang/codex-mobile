@@ -69,6 +69,8 @@ const OWNER_INSTRUCTIONS = `This Codex process runs as the desktop user ningmeng
 const MAX_DOCUMENT_PREVIEW_PAGES = 300;
 const TURN_MODES = new Set(['default', 'plan']);
 const APPROVAL_REVIEWERS = new Set(['auto_review', 'user', 'never']);
+const THREAD_COPY_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
+const THREAD_COPY_RESULT_TTL_MS = 10 * 60 * 1000;
 const EXECUTE_MODE_INSTRUCTIONS = '执行模式：直接实施用户的请求，不要先输出完整方案或规划；除非用户明确要求方案/设计/规划，才先设计方案。';
 const PLAN_MODE_INSTRUCTIONS = [
   '规划模式交互规则：先通过只读检查解决可发现的问题，只询问会实质改变方案且无法从上下文推断的决策。',
@@ -270,6 +272,10 @@ function isThreadGone(error) {
     || message.includes('rollout');
 }
 
+function isActiveWriter(error) {
+  return String(error?.message ?? '').includes('already has an active writer');
+}
+
 function resolveRelatedPath(baseDir, relative, config) {
   const candidates = [relative];
   if (relative.includes('%')) {
@@ -405,7 +411,7 @@ function turnSettings(body, cwd, catalogs, config) {
   };
 }
 
-function wireBridge(bridge, tracker, threadActivity, hub, config) {
+function wireBridge(bridge, tracker, threadActivity, hub, config, lifecycle = {}) {
   bridge.on('status', (status) => hub.publish('bridge-status', status));
   bridge.on('bridgeError', (error) => {
     log(config, 'error', 'App Server bridge error', error.stack ?? error.message);
@@ -426,6 +432,7 @@ function wireBridge(bridge, tracker, threadActivity, hub, config) {
     if (message.method === 'turn/started') {
       const threadId = params.threadId ?? params.thread_id;
       const turnId = params.turn?.id ?? params.turnId ?? params.turn_id;
+      lifecycle.onTurnStarted?.(threadId, turnId);
       tracker.bindTurn(threadId, turnId);
       const phase = threadActivity.get(threadId)?.phase ?? 'default';
       threadActivity.start(threadId, turnId, phase);
@@ -438,7 +445,11 @@ function wireBridge(bridge, tracker, threadActivity, hub, config) {
       const turnId = params.turn?.id ?? params.turnId ?? params.turn_id;
       threadActivity.complete(threadId, turnId, params.turn?.status ?? params.status ?? 'completed');
       tracker.finish(threadId, turnId)
-        .catch((error) => hub.publish('artifact-error', { message: error.message }));
+        .catch((error) => hub.publish('artifact-error', { message: error.message }))
+        .finally(() => lifecycle.onTurnCompleted?.(threadId, turnId));
+    }
+    if (message.method === 'thread/closed') {
+      lifecycle.onThreadClosed?.(params.threadId ?? params.thread_id ?? params.thread?.id);
     }
     hub.publish('codex', message);
   });
@@ -520,7 +531,115 @@ export function createCodexMobileServer(options = {}) {
     catalogs.refreshedAt = 0;
     catalogs.refreshPromise = null;
   };
+  const attachedThreads = new Set();
+  const attachingThreads = new Map();
+  const releasingThreads = new Map();
+  const activeWriterTurns = new Set();
+  let startingWriterTurns = 0;
+  const writerRecycleDelayMs = Math.max(0, options.writerRecycleDelayMs ?? 250);
+  let writerRecycleTimer = null;
+  let writerRecyclePromise = null;
+  const cancelWriterRecycle = () => {
+    if (!writerRecycleTimer) return;
+    clearTimeout(writerRecycleTimer);
+    writerRecycleTimer = null;
+  };
+  const clearAttachedThreads = () => {
+    attachedThreads.clear();
+    attachingThreads.clear();
+    releasingThreads.clear();
+  };
+  const writerLifecycleIdle = () => activeWriterTurns.size === 0
+    && startingWriterTurns === 0
+    && (bridge.getServerRequests?.().length ?? 0) === 0;
+  const recycleWriterProcess = async () => {
+    if (!writerLifecycleIdle() || writerRecyclePromise) return;
+    if (typeof bridge.restart !== 'function') return;
+    writerRecyclePromise = bridge.restart()
+      .catch((error) => {
+        log(config, 'error', 'unable to recycle idle App Server writer', error.stack ?? error.message);
+        hub.publish('bridge-error', { message: `会话 writer 释放失败：${error.message}` });
+      })
+      .finally(() => { writerRecyclePromise = null; });
+    await writerRecyclePromise;
+  };
+  const scheduleWriterRecycle = () => {
+    cancelWriterRecycle();
+    if (!writerLifecycleIdle()) return;
+    writerRecycleTimer = setTimeout(() => {
+      writerRecycleTimer = null;
+      recycleWriterProcess();
+    }, writerRecycleDelayMs);
+    writerRecycleTimer.unref?.();
+  };
+  const releaseThread = (threadId) => {
+    const id = String(threadId ?? '');
+    if (!id) return Promise.resolve();
+    const existing = releasingThreads.get(id);
+    if (existing) return existing;
+    const pending = bridge.request('thread/unsubscribe', { threadId: id })
+      .catch((error) => {
+        const message = String(error?.message ?? '').toLowerCase();
+        if (!message.includes('not loaded') && !message.includes('not subscribed')) {
+          log(config, 'debug', `unable to unsubscribe thread ${id}`, error.message);
+        }
+      })
+      .finally(() => {
+        attachedThreads.delete(id);
+        if (releasingThreads.get(id) === pending) releasingThreads.delete(id);
+        scheduleWriterRecycle();
+      });
+    releasingThreads.set(id, pending);
+    return pending;
+  };
+  const attachThread = async (threadId, params = {}) => {
+    const id = String(threadId);
+    cancelWriterRecycle();
+    if (writerRecyclePromise) await writerRecyclePromise;
+    const releasing = releasingThreads.get(id);
+    if (releasing) await releasing;
+    if (attachedThreads.has(id)) return Promise.resolve(null);
+    const existing = attachingThreads.get(id);
+    if (existing) return existing;
+    const pending = bridge.request('thread/resume', {
+      threadId: id,
+      developerInstructions: OWNER_INSTRUCTIONS,
+      ...params,
+    }).then((result) => {
+      attachedThreads.add(id);
+      if (result?.thread?.id) attachedThreads.add(result.thread.id);
+      return result;
+    }).finally(() => {
+      if (attachingThreads.get(id) === pending) attachingThreads.delete(id);
+    });
+    attachingThreads.set(id, pending);
+    return pending;
+  };
+  if (typeof bridge.on === 'function') {
+    bridge.on('status', (status) => {
+      if (status?.ready === false) clearAttachedThreads();
+    });
+  }
+  const writerLifecycle = {
+    onTurnStarted(threadId) {
+      if (threadId) activeWriterTurns.add(String(threadId));
+    },
+    onTurnCompleted(threadId) {
+      if (!threadId) return;
+      activeWriterTurns.delete(String(threadId));
+      releaseThread(threadId);
+    },
+    onThreadClosed(threadId) {
+      if (!threadId) return;
+      const id = String(threadId);
+      attachedThreads.delete(id);
+      attachingThreads.delete(id);
+      releasingThreads.delete(id);
+      activeWriterTurns.delete(id);
+    },
+  };
   const threadMeta = new Map();
+  const threadCopyRequests = new Map();
   const rememberThread = (thread, fallbackCwd = null) => {
     if (!thread?.id) return;
     const previous = threadMeta.get(thread.id) ?? {};
@@ -532,6 +651,126 @@ export function createCodexMobileServer(options = {}) {
       name: thread.name ?? previous.name,
       updatedAt: thread.updatedAt ?? previous.updatedAt,
     });
+  };
+  const latestThreadTurn = async (threadId) => {
+    const result = await bridge.request('thread/turns/list', {
+      threadId,
+      pageSize: 1,
+      sortDirection: 'desc',
+      itemsView: 'full',
+    });
+    return result?.data?.[0] ?? null;
+  };
+  const cleanupCopyRequests = (now = Date.now()) => {
+    for (const [key, value] of threadCopyRequests) {
+      if (value.expiresAt <= now) threadCopyRequests.delete(key);
+    }
+  };
+  const copiedThreadAppearsInDirectory = async (threadId, cwd) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const page = await listThreads(bridge, config, { cwd, limit: 100 });
+      if (page.data.some((thread) => thread.id === threadId)) return true;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)));
+    }
+    return false;
+  };
+  const copyThreadToDirectory = async (sourceThreadId, body) => {
+    const targetCwd = validateProject(body.cwd, config);
+    const publishProgress = (stage, label) => hub.publish('thread-copy-progress', {
+      requestId: body.requestId,
+      sourceThreadId,
+      stage,
+      label,
+    });
+    cancelWriterRecycle();
+    if (writerRecyclePromise) await writerRecyclePromise;
+    startingWriterTurns += 1;
+    let copiedThreadId = null;
+    try {
+      publishProgress('reading', '正在读取源会话历史');
+      const source = await bridge.request('thread/read', { threadId: sourceThreadId, includeTurns: false });
+      if (!threadAllowed(source.thread, config)) {
+        throw new AppError('源会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
+      }
+      const activity = threadActivity.get(sourceThreadId);
+      if (['running', 'planning', 'waiting'].includes(activity.status)) {
+        throw new AppError('当前会话仍在执行或等待确认，请在任务结束后再复制。', 409, 'THREAD_COPY_BUSY');
+      }
+      const sourceName = String(source.thread?.name ?? source.thread?.preview ?? '未命名会话').trim() || '未命名会话';
+      const requestedName = typeof body.name === 'string' ? body.name.trim() : '';
+      const copyName = requestedName || `${sourceName}（副本）`;
+      if (copyName.length > 100) throw new AppError('副本名称过长。', 400, 'NAME_TOO_LONG');
+      const sourceLatestTurn = await latestThreadTurn(sourceThreadId);
+      publishProgress('forking', '正在创建完整会话副本');
+      const forked = await bridge.request('thread/fork', {
+        threadId: sourceThreadId,
+        cwd: targetCwd,
+        runtimeWorkspaceRoots: [targetCwd],
+        developerInstructions: OWNER_INSTRUCTIONS,
+        excludeTurns: true,
+        deferGoalContinuation: true,
+      });
+      copiedThreadId = forked?.thread?.id;
+      if (!copiedThreadId || copiedThreadId === sourceThreadId) {
+        throw new AppError('Codex 没有返回有效的副本会话。', 502, 'THREAD_COPY_INVALID');
+      }
+      attachedThreads.add(copiedThreadId);
+      publishProgress('naming', '正在写入副本名称和目标目录');
+      const named = await bridge.request('thread/name/set', { threadId: copiedThreadId, name: copyName });
+      const copied = await bridge.request('thread/read', { threadId: copiedThreadId, includeTurns: false });
+      const copiedCwd = validateProject(copied.thread?.cwd, config);
+      if (copiedCwd !== targetCwd) {
+        throw new AppError('副本目录校验失败，Codex 返回了错误的工作目录。', 502, 'THREAD_COPY_CWD_MISMATCH');
+      }
+      publishProgress('history', '正在校验会话历史完整性');
+      const copiedLatestTurn = await latestThreadTurn(copiedThreadId);
+      if (sourceLatestTurn && copiedLatestTurn?.id !== sourceLatestTurn.id) {
+        throw new AppError('副本历史校验失败，最新回合不完整。', 502, 'THREAD_COPY_HISTORY_MISMATCH');
+      }
+      publishProgress('directory', '正在校验目标目录索引');
+      if (!await copiedThreadAppearsInDirectory(copiedThreadId, targetCwd)) {
+        throw new AppError('副本目录索引校验失败，目标目录中无法找到新会话。', 502, 'THREAD_COPY_NOT_LISTED');
+      }
+      const verifiedThread = {
+        ...(forked.thread ?? {}),
+        ...(named?.thread ?? {}),
+        ...(copied.thread ?? {}),
+        id: copiedThreadId,
+        name: copyName,
+        cwd: targetCwd,
+      };
+      rememberThread(verifiedThread, targetCwd);
+      tracker.registerThread(copiedThreadId, targetCwd);
+      await releaseThread(copiedThreadId);
+      publishProgress('completed', '复制完成，正在打开副本');
+      return {
+        copied: true,
+        sourceThreadId,
+        thread: threadActivity.attach(verifiedThread),
+      };
+    } catch (error) {
+      publishProgress('failed', `复制失败：${error.message}`);
+      if (copiedThreadId) {
+        await bridge.request('thread/unsubscribe', { threadId: copiedThreadId }).catch(() => null);
+        attachedThreads.delete(copiedThreadId);
+        attachingThreads.delete(copiedThreadId);
+        releasingThreads.delete(copiedThreadId);
+        await bridge.request('thread/delete', { threadId: copiedThreadId }).catch((cleanupError) => {
+          log(config, 'error', `unable to clean incomplete thread copy ${copiedThreadId}`, cleanupError.message);
+        });
+      }
+      if (isActiveWriter(error)) {
+        throw new AppError(
+          '源会话正在终端或另一个 Codex 进程中使用，请退出占用进程后再复制。',
+          409,
+          'THREAD_ACTIVE_WRITER',
+        );
+      }
+      throw error;
+    } finally {
+      startingWriterTurns = Math.max(0, startingWriterTurns - 1);
+      if (copiedThreadId && writerLifecycleIdle()) scheduleWriterRecycle();
+    }
   };
   const activeFavorites = () => favorites.list(backendManager.activeId());
   const publishFavorites = (data = activeFavorites()) => {
@@ -561,6 +800,7 @@ export function createCodexMobileServer(options = {}) {
       await tracker.finishAll();
       try {
         if (typeof bridge.reconfigure !== 'function') throw new Error('当前 App Server 不支持运行时切换。');
+        clearAttachedThreads();
         await bridge.reconfigure(nextRuntime);
         backendManager.apply(target.id);
       } catch (error) {
@@ -588,7 +828,7 @@ export function createCodexMobileServer(options = {}) {
     })().finally(() => { backendSwitchPromise = null; });
     return backendSwitchPromise;
   };
-  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config);
+  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config, writerLifecycle);
 
   const server = http.createServer(async (request, response) => {
     const startedAt = Date.now();
@@ -722,6 +962,26 @@ export function createCodexMobileServer(options = {}) {
         json(response, 200, await refreshCatalogs(url.searchParams.get('refresh') === '1'));
         return;
       }
+      if (request.method === 'GET' && pathname === '/api/account/status') {
+        const accountResult = await bridge.request('account/read', { refreshToken: false })
+          .catch((error) => ({ account: null, error: error.message }));
+        const rateLimitResult = await bridge.request('account/rateLimits/read')
+          .catch((error) => ({ rateLimits: null, rateLimitsByLimitId: null, error: error.message }));
+        const rateLimits = rateLimitResult?.rateLimits ?? null;
+        const rateLimitsByLimitId = rateLimitResult?.rateLimitsByLimitId ?? null;
+        const available = Boolean(rateLimits || (rateLimitsByLimitId && Object.keys(rateLimitsByLimitId).length));
+        json(response, 200, {
+          backend: backendManager.activeId(),
+          account: accountResult?.account ?? null,
+          requiresOpenaiAuth: accountResult?.requiresOpenaiAuth ?? null,
+          available,
+          rateLimits,
+          rateLimitsByLimitId,
+          rateLimitResetCredits: rateLimitResult?.rateLimitResetCredits ?? null,
+          message: available ? null : (rateLimitResult?.error || accountResult?.error || '当前 Agent 没有可用的额度数据。'),
+        });
+        return;
+      }
       if (request.method === 'GET' && pathname === '/api/bootstrap') {
         void refreshCatalogs().catch((error) => log(config, 'debug', 'Catalog refresh failed', error.message));
         const pendingRequests = bridge.getServerRequests();
@@ -820,6 +1080,7 @@ export function createCodexMobileServer(options = {}) {
           developerInstructions: OWNER_INSTRUCTIONS,
           ephemeral: false,
         });
+        attachedThreads.add(result.thread.id);
         tracker.registerThread(result.thread.id, cwd);
         rememberThread(result.thread, cwd);
         json(response, 201, { ...result, thread: threadActivity.attach(result.thread) });
@@ -833,6 +1094,31 @@ export function createCodexMobileServer(options = {}) {
         tracker.registerThread(result.thread.id, result.thread.cwd);
         rememberThread(result.thread);
         json(response, 200, { ...result, thread: threadActivity.reconcile(result.thread) });
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/copy$/);
+      if (request.method === 'POST' && match) {
+        const body = await readBody(request, config.maxBodyBytes);
+        const requestId = typeof body.requestId === 'string' ? body.requestId.trim() : '';
+        if (!THREAD_COPY_REQUEST_ID.test(requestId)) {
+          throw new AppError('复制请求标识无效。', 400, 'THREAD_COPY_REQUEST_ID_INVALID');
+        }
+        cleanupCopyRequests();
+        const copyKey = `${backendManager.activeId()}:${match[0]}:${requestId}`;
+        let entry = threadCopyRequests.get(copyKey);
+        const replayed = Boolean(entry);
+        if (!entry) {
+          const promise = copyThreadToDirectory(match[0], body);
+          entry = { promise, expiresAt: Date.now() + THREAD_COPY_RESULT_TTL_MS };
+          threadCopyRequests.set(copyKey, entry);
+        }
+        try {
+          const result = await entry.promise;
+          json(response, replayed ? 200 : 201, { ...result, replayed });
+        } catch (error) {
+          if (threadCopyRequests.get(copyKey) === entry) threadCopyRequests.delete(copyKey);
+          throw error;
+        }
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/name$/);
@@ -852,6 +1138,8 @@ export function createCodexMobileServer(options = {}) {
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/delete$/);
       if (request.method === 'POST' && match) {
         const result = await bridge.request('thread/delete', { threadId: match[0] });
+        attachedThreads.delete(match[0]);
+        attachingThreads.delete(match[0]);
         threadMeta.delete(match[0]);
         threadActivity.remove(match[0]);
         if (activeFavorites().some((item) => item.id === match[0])) {
@@ -868,15 +1156,12 @@ export function createCodexMobileServer(options = {}) {
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/resume$/);
       if (request.method === 'POST' && match) {
-        const result = await bridge.request('thread/resume', {
-          threadId: match[0],
-          developerInstructions: OWNER_INSTRUCTIONS,
-          excludeTurns: true,
-        });
+        const result = await bridge.request('thread/read', { threadId: match[0], includeTurns: false });
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
-        tracker.registerThread(result.thread.id, result.cwd);
-        rememberThread(result.thread, result.cwd);
-        json(response, 200, { ...result, thread: threadActivity.attach(result.thread) });
+        const cwd = result.cwd ?? result.thread.cwd;
+        tracker.registerThread(result.thread.id, cwd);
+        rememberThread(result.thread, cwd);
+        json(response, 200, { ...result, readOnly: true, thread: threadActivity.attach(result.thread) });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns$/);
@@ -910,75 +1195,91 @@ export function createCodexMobileServer(options = {}) {
         return;
       }
       if (request.method === 'POST' && match) {
-        const body = await readBody(request, config.maxBodyBytes);
-        const cwd = validateProject(body.cwd ?? threadMeta.get(match[0])?.cwd, config);
-        if (!catalogs.models.length) {
-          const models = await bridge.request('model/list', { limit: 100, includeHidden: false });
-          catalogs.models = models?.data ?? [];
-        }
-        if (!catalogs.collaborationModes.length) {
-          const modes = await bridge.request('collaborationMode/list', {}).catch(() => ({ data: [] }));
-          catalogs.collaborationModes = modes?.data ?? [];
-        }
-        const settings = turnSettings(body, cwd, catalogs, config);
-        let activeThreadId = match[0];
-        let recreated = false;
+        const requestedThreadId = match[0];
+        cancelWriterRecycle();
+        startingWriterTurns += 1;
         try {
-          const resumed = await bridge.request('thread/resume', {
-            threadId: match[0],
-            developerInstructions: OWNER_INSTRUCTIONS,
-          });
-          if (resumed.thread) rememberThread(resumed.thread, resumed.cwd);
-          else if (resumed.cwd) rememberThread({ id: match[0], cwd: resumed.cwd });
-        } catch (error) {
-          if (!isThreadGone(error)) throw error;
-          recreated = true;
-        }
-        tracker.begin(activeThreadId, cwd);
-        try {
-          let result;
+          const body = await readBody(request, config.maxBodyBytes);
+          const cwd = validateProject(body.cwd ?? threadMeta.get(requestedThreadId)?.cwd, config);
+          if (!catalogs.models.length) {
+            const models = await bridge.request('model/list', { limit: 100, includeHidden: false });
+            catalogs.models = models?.data ?? [];
+          }
+          if (!catalogs.collaborationModes.length) {
+            const modes = await bridge.request('collaborationMode/list', {}).catch(() => ({ data: [] }));
+            catalogs.collaborationModes = modes?.data ?? [];
+          }
+          const settings = turnSettings(body, cwd, catalogs, config);
+          let activeThreadId = requestedThreadId;
+          let recreated = false;
           try {
-            result = await bridge.request('turn/start', {
-              threadId: activeThreadId,
-              input: userInput(body, cwd, config),
-              cwd,
-              runtimeWorkspaceRoots: [cwd],
-              ...settings,
+            const resumed = await attachThread(requestedThreadId);
+            if (resumed?.thread) rememberThread(resumed.thread, resumed.cwd);
+            else if (resumed?.cwd) rememberThread({ id: requestedThreadId, cwd: resumed.cwd });
+          } catch (error) {
+            if (isActiveWriter(error)) {
+              throw new AppError(
+                '该会话正在终端或另一个 Codex 进程中使用。请先退出占用进程，再从手机继续。',
+                409,
+                'THREAD_ACTIVE_WRITER',
+              );
+            }
+            if (isThreadGone(error)) recreated = true;
+            else throw error;
+          }
+          tracker.begin(activeThreadId, cwd);
+          try {
+            let result;
+            try {
+              result = await bridge.request('turn/start', {
+                threadId: activeThreadId,
+                input: userInput(body, cwd, config),
+                cwd,
+                runtimeWorkspaceRoots: [cwd],
+                ...settings,
+              });
+            } catch (error) {
+              if (!isThreadGone(error)) throw error;
+              await tracker.finish(activeThreadId);
+              const started = await bridge.request('thread/start', {
+                cwd,
+                runtimeWorkspaceRoots: [cwd],
+                ...(body.model ? { model: String(body.model) } : {}),
+                ...(!body.model && config.defaultModel ? { model: config.defaultModel } : {}),
+                serviceName: 'codex-mobile',
+                developerInstructions: OWNER_INSTRUCTIONS,
+                ephemeral: false,
+              });
+              activeThreadId = started.thread.id;
+              attachedThreads.add(activeThreadId);
+              rememberThread(started.thread, cwd);
+              tracker.begin(activeThreadId, cwd);
+              result = await bridge.request('turn/start', {
+                threadId: activeThreadId,
+                input: userInput(body, cwd, config),
+                cwd,
+                runtimeWorkspaceRoots: [cwd],
+                ...settings,
+              });
+              recreated = true;
+            }
+            activeWriterTurns.add(activeThreadId);
+            tracker.bindTurn(activeThreadId, result.turn.id);
+            const activity = threadActivity.start(activeThreadId, result.turn.id, body.mode ?? 'default');
+            json(response, 201, {
+              ...result,
+              thread: { id: activeThreadId, cwd, activity },
+              recreated,
             });
           } catch (error) {
-            if (!isThreadGone(error)) throw error;
+            activeWriterTurns.delete(activeThreadId);
             await tracker.finish(activeThreadId);
-            const started = await bridge.request('thread/start', {
-              cwd,
-              runtimeWorkspaceRoots: [cwd],
-              ...(body.model ? { model: String(body.model) } : {}),
-              ...(!body.model && config.defaultModel ? { model: config.defaultModel } : {}),
-              serviceName: 'codex-mobile',
-              developerInstructions: OWNER_INSTRUCTIONS,
-              ephemeral: false,
-            });
-            activeThreadId = started.thread.id;
-            rememberThread(started.thread, cwd);
-            tracker.begin(activeThreadId, cwd);
-            result = await bridge.request('turn/start', {
-              threadId: activeThreadId,
-              input: userInput(body, cwd, config),
-              cwd,
-              runtimeWorkspaceRoots: [cwd],
-              ...settings,
-            });
-            recreated = true;
+            if (attachedThreads.has(activeThreadId)) await releaseThread(activeThreadId);
+            throw error;
           }
-          tracker.bindTurn(activeThreadId, result.turn.id);
-          const activity = threadActivity.start(activeThreadId, result.turn.id, body.mode ?? 'default');
-          json(response, 201, {
-            ...result,
-            thread: { id: activeThreadId, cwd, activity },
-            recreated,
-          });
-        } catch (error) {
-          await tracker.finish(activeThreadId);
-          throw error;
+        } finally {
+          startingWriterTurns = Math.max(0, startingWriterTurns - 1);
+          if (writerLifecycleIdle() && releasingThreads.size > 0) scheduleWriterRecycle();
         }
         return;
       }
@@ -998,6 +1299,8 @@ export function createCodexMobileServer(options = {}) {
       if (request.method === 'POST' && match) {
         const result = await bridge.request('turn/interrupt', { threadId: match[0], turnId: match[1] });
         const activity = threadActivity.complete(match[0], match[1], 'interrupted');
+        activeWriterTurns.delete(match[0]);
+        if (attachedThreads.has(match[0])) await releaseThread(match[0]);
         json(response, 200, { ...(result ?? { interrupted: true }), activity });
         return;
       }

@@ -128,6 +128,26 @@ select { max-width: 126px; min-width: 0; padding: 8px 25px 8px 9px; border: 1px 
 .settings-body label > span { padding-left: 2px; color: #697480; font: 8px/1 ui-monospace, monospace; letter-spacing: .08em; }
 .settings-body select { width: 100%; max-width: none; }
 .settings-runtime { margin: 2px 0 0; color: #697480; font: 10px/1.4 ui-monospace, monospace; }
+#settingsSheet { max-height: min(88dvh, 720px); }
+#settingsSheet .settings-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.account-quota { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-inset); }
+.account-quota-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.account-quota-head > div { min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.account-quota-head strong { font-size: 11px; }
+.account-quota-head small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.account-quota-head button { flex: 0 0 auto; padding: 4px 7px; border: 0; border-radius: 7px; background: transparent; color: var(--blue); font-size: 9px; cursor: pointer; }
+.account-quota-head button:disabled { color: var(--muted); cursor: wait; }
+.account-quota-list { display: grid; gap: 7px; }
+.account-quota-empty { margin: 0; padding: 5px 1px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.account-quota-item { display: grid; gap: 4px; }
+.account-quota-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 10px; }
+.account-quota-label strong { color: var(--text); font-size: 10px; }
+.account-quota-label span { color: var(--accent); font: 700 10px var(--font-mono); }
+.account-quota-track { height: 5px; overflow: hidden; border-radius: 99px; background: var(--panel-2); }
+.account-quota-track i { display: block; width: var(--quota-left); height: 100%; border-radius: inherit; background: var(--accent); }
+.account-quota-item[data-low="true"] .account-quota-label span { color: var(--danger); }
+.account-quota-item[data-low="true"] .account-quota-track i { background: var(--danger); }
+.account-quota-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 8px; }
 .empty-state { min-height: 55vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 38px; text-align: center; }
 .empty-state h2 { margin: 6px 0 10px; font-size: 25px; letter-spacing: -.035em; }
 .empty-state > p:last-child { max-width: 410px; margin: 0; color: var(--muted); line-height: 1.65; }
@@ -359,6 +379,22 @@ body.approval-open .composer { opacity: 0; pointer-events: none; }
 .thread-action-row.danger { color: var(--danger); border-color: #593b3b; }
 .thread-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread-confirm-actions .button.danger { border-color: var(--danger); background: #3a1c1c; color: #ffb1aa; }
+.thread-copy-dialog { max-height: min(82dvh, 680px); }
+.thread-copy-body { min-height: 0; grid-template-rows: auto auto auto minmax(100px, 1fr) auto auto; overflow: hidden; }
+.thread-copy-source, .thread-copy-status { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.thread-copy-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-copy-target-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; min-width: 0; }
+.thread-copy-target-head > div { min-width: 0; }
+.thread-copy-target-head small { display: block; margin-bottom: 3px; color: var(--subtle); font-size: 9px; }
+.thread-copy-target-head .file-dialog-path { max-height: 2.9em; overflow: hidden; }
+.thread-copy-target-head .button { flex: 0 0 auto; padding: 6px 9px; font-size: 10px; }
+.thread-copy-directory-list { min-height: 100px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; display: grid; align-content: start; gap: 6px; padding: 1px; -webkit-overflow-scrolling: touch; }
+.thread-copy-directory-list .empty-list { padding: 24px 12px; font-size: 10px; }
+.thread-copy-directory { width: 100%; min-width: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr) 12px; align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); color: var(--text); text-align: left; cursor: pointer; }
+.thread-copy-directory i { color: var(--accent); font-style: normal; }
+.thread-copy-directory span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.thread-copy-directory b { color: var(--muted); font-size: 13px; }
+.thread-copy-status[data-error="true"] { color: var(--danger); }
 .section-head { margin-bottom: 20px; }.section-head h2 { margin: 2px 0 0; font-size: 28px; letter-spacing: -.04em; }
 .thread-home-title { min-width: 0; display: grid; justify-items: start; gap: 2px; }
 #artifactsView .artifact-search { margin-top: 0; }

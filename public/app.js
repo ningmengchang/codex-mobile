@@ -373,6 +373,88 @@ function renderBackends() {
   select.disabled = state.backendSwitching || backends.filter((item) => item.available).length < 2;
 }
 
+function accountPlanLabel(status) {
+  const account = status?.account;
+  const plan = account?.planType ? String(account.planType).toUpperCase() : '';
+  const type = account?.type === 'chatgpt' ? 'ChatGPT'
+    : account?.type === 'apiKey' ? 'API Key'
+      : account?.type === 'amazonBedrock' ? 'Bedrock'
+        : account?.type ? String(account.type) : '';
+  const backend = state.bootstrap?.backends?.data?.find((item) => item.id === status?.backend)?.label ?? '';
+  return [backend, type, plan].filter(Boolean).join(' · ');
+}
+
+function quotaWindowLabel(minutes) {
+  const duration = Number(minutes);
+  if (!Number.isFinite(duration) || duration <= 0) return '额度周期';
+  if (duration === 10_080) return '每周额度';
+  if (duration === 1_440) return '每日额度';
+  if (duration % 1_440 === 0) return `${duration / 1_440} 天额度`;
+  if (duration % 60 === 0) return `${duration / 60} 小时额度`;
+  return `${duration} 分钟额度`;
+}
+
+function accountQuotaWindows(status) {
+  const byId = status?.rateLimitsByLimitId && typeof status.rateLimitsByLimitId === 'object'
+    ? Object.values(status.rateLimitsByLimitId)
+    : [];
+  const buckets = byId.length ? byId : status?.rateLimits ? [status.rateLimits] : [];
+  const multipleBuckets = buckets.length > 1;
+  return buckets.flatMap((bucket) => ['primary', 'secondary'].flatMap((slot) => {
+    const window = bucket?.[slot];
+    if (!window || !Number.isFinite(Number(window.usedPercent))) return [];
+    const bucketName = bucket.limitName || (bucket.limitId && bucket.limitId !== 'codex' ? bucket.limitId : '');
+    return [{
+      key: `${bucket.limitId ?? 'codex'}:${slot}`,
+      label: [multipleBuckets ? bucketName : '', quotaWindowLabel(window.windowDurationMins)].filter(Boolean).join(' · '),
+      usedPercent: Math.max(0, Math.min(100, Number(window.usedPercent))),
+      resetsAt: Number(window.resetsAt) || null,
+    }];
+  }));
+}
+
+function renderAccountStatus() {
+  const status = state.accountStatus;
+  $('#accountQuotaPlan').textContent = accountPlanLabel(status);
+  const list = $('#accountQuotaList');
+  if (state.accountStatusLoading && !status) {
+    list.innerHTML = '<p class="account-quota-empty">正在读取 Codex 额度…</p>';
+    return;
+  }
+  const windows = accountQuotaWindows(status);
+  if (!windows.length) {
+    list.innerHTML = `<p class="account-quota-empty">${escapeHtml(status?.message || '当前 Agent 没有可用的额度数据')}</p>`;
+    return;
+  }
+  list.innerHTML = windows.map((window) => {
+    const left = Math.max(0, 100 - window.usedPercent);
+    const rounded = Math.round(left);
+    const reset = window.resetsAt ? formatDateTime(window.resetsAt * 1000) : '';
+    return `<div class="account-quota-item" data-low="${left <= 15}">
+      <div class="account-quota-label"><strong>${escapeHtml(window.label)}</strong><span>${rounded}% 剩余</span></div>
+      <div class="account-quota-track" role="progressbar" aria-label="${escapeAttribute(window.label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${rounded}"><i style="--quota-left:${left}%"></i></div>
+      <div class="account-quota-meta"><span>已用 ${Math.round(window.usedPercent)}%</span><span>${reset ? `${escapeHtml(reset)} 重置` : ''}</span></div>
+    </div>`;
+  }).join('');
+}
+
+async function loadAccountStatus(options = {}) {
+  if (state.accountStatusLoading) return;
+  state.accountStatusLoading = true;
+  $('#refreshAccountStatusButton').disabled = true;
+  if (!options.silent) state.accountStatus = null;
+  renderAccountStatus();
+  try {
+    state.accountStatus = await api('/api/account/status');
+  } catch (error) {
+    state.accountStatus = { available: false, message: error.message, backend: activeBackendId() };
+  } finally {
+    state.accountStatusLoading = false;
+    $('#refreshAccountStatusButton').disabled = false;
+    renderAccountStatus();
+  }
+}
+
 async function loadRuntimeCatalogs() {
   try {
     const result = await api('/api/catalogs');
@@ -1299,6 +1381,7 @@ function openThreadActionDialog(thread, source = 'list') {
   state.threadAction = thread;
   const fromChat = source === 'chat';
   $('#threadArtifactsAction').hidden = !fromChat;
+  $('#threadCopyAction').hidden = fromChat;
   $('#threadRenameAction').hidden = fromChat;
   $('#threadDeleteAction').hidden = fromChat;
   $('#threadDeleteConfirm').hidden = true;
@@ -1309,6 +1392,7 @@ function openThreadActionDialog(thread, source = 'list') {
 function closeThreadActionDialog() {
   $('#threadActionDialog').close();
   $('#threadArtifactsAction').hidden = true;
+  $('#threadCopyAction').hidden = false;
   state.threadAction = null;
 }
 
@@ -1323,6 +1407,172 @@ function openThreadArtifactsAction() {
   $('#threadArtifactsAction').hidden = true;
   state.threadAction = null;
   openCurrentThreadArtifacts();
+}
+
+function createThreadCopyRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `copy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function renderThreadCopyProgress() {
+  const copy = state.threadCopy;
+  if (!copy?.progressLabel) return;
+  const elapsed = copy.startedAt ? Math.max(0, Math.floor((Date.now() - copy.startedAt) / 1000)) : 0;
+  $('#threadCopyStatus').dataset.error = String(copy.progressError === true);
+  $('#threadCopyStatus').textContent = `${copy.progressLabel}${copy.startedAt ? ` · ${elapsed} 秒` : ''}`;
+}
+
+function setThreadCopyProgress(label, error = false) {
+  if (!state.threadCopy) return;
+  state.threadCopy.progressLabel = label;
+  state.threadCopy.progressError = error;
+  renderThreadCopyProgress();
+}
+
+function stopThreadCopyElapsed(copy = state.threadCopy) {
+  if (!copy?.elapsedTimer) return;
+  clearInterval(copy.elapsedTimer);
+  copy.elapsedTimer = null;
+}
+
+function startThreadCopyElapsed(copy) {
+  stopThreadCopyElapsed(copy);
+  copy.startedAt = Date.now();
+  copy.elapsedTimer = setInterval(() => {
+    if (state.threadCopy !== copy) return stopThreadCopyElapsed(copy);
+    renderThreadCopyProgress();
+  }, 1000);
+}
+
+function setThreadCopyBusy(busy) {
+  const copy = state.threadCopy;
+  if (copy) copy.busy = busy;
+  $('#threadCopyName').disabled = busy;
+  $('#threadCopyUpButton').disabled = busy || !copy?.parent;
+  $('#cancelThreadCopyButton').disabled = busy;
+  $('#closeThreadCopyButton').disabled = busy;
+  $('#confirmThreadCopyButton').disabled = busy || !copy?.path;
+  $('#confirmThreadCopyButton').textContent = busy ? '正在复制…' : '复制并打开';
+  $$('#threadCopyDirectoryList button').forEach((button) => { button.disabled = busy; });
+}
+
+function renderThreadCopyDirectories(data) {
+  const copy = state.threadCopy;
+  if (!copy) return;
+  copy.path = data.current.path;
+  copy.parent = data.parent?.path ?? null;
+  $('#threadCopyPath').textContent = copy.path;
+  $('#threadCopyUpButton').disabled = copy.busy || !copy.parent;
+  const directories = (data.entries ?? []).filter((entry) => entry.isDirectory !== false);
+  const list = $('#threadCopyDirectoryList');
+  list.replaceChildren();
+  for (const directory of directories) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'thread-copy-directory';
+    button.innerHTML = `<i>⌑</i><span>${escapeHtml(directory.name)}</span><b>›</b>`;
+    button.addEventListener('click', () => browseThreadCopyDirectories(directory.path));
+    list.append(button);
+  }
+  if (!directories.length) list.innerHTML = '<div class="empty-list">当前目录没有子目录</div>';
+  $('#threadCopyStatus').dataset.error = 'false';
+  $('#threadCopyStatus').textContent = `将复制到当前目录${data.truncated ? '；目录较多，仅显示前部分' : ''}`;
+  setThreadCopyBusy(copy.busy);
+}
+
+async function browseThreadCopyDirectories(path = '') {
+  const copy = state.threadCopy;
+  if (!copy || copy.busy) return;
+  const seq = (copy.browseSeq ?? 0) + 1;
+  copy.browseSeq = seq;
+  $('#threadCopyDirectoryList').innerHTML = '<div class="empty-list">正在读取目录…</div>';
+  $('#threadCopyStatus').textContent = '';
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : '';
+    const data = await api(`/api/projects${query}`);
+    if (state.threadCopy !== copy || copy.browseSeq !== seq) return;
+    renderThreadCopyDirectories(data);
+  } catch (error) {
+    if (state.threadCopy !== copy || copy.browseSeq !== seq) return;
+    $('#threadCopyDirectoryList').innerHTML = '<div class="empty-list">无法读取这个目录</div>';
+    $('#threadCopyStatus').dataset.error = 'true';
+    $('#threadCopyStatus').textContent = error.message;
+  }
+}
+
+function openThreadCopyDialog() {
+  const source = state.threadAction;
+  if (!source) return;
+  const sourceName = source.name || source.preview || '未命名会话';
+  const initialPath = source.cwd
+    ?? state.currentProject
+    ?? state.bootstrap?.projects?.current?.path
+    ?? '';
+  state.threadCopy = {
+    source: { ...source },
+    path: initialPath,
+    parent: null,
+    requestId: createThreadCopyRequestId(),
+    browseSeq: 0,
+    busy: false,
+  };
+  $('#threadActionDialog').close();
+  state.threadAction = null;
+  $('#threadCopySource').textContent = `源会话：${sourceName}`;
+  $('#threadCopyName').value = `${sourceName}（副本）`.slice(0, 100);
+  $('#threadCopyPath').textContent = initialPath;
+  $('#threadCopyDirectoryList').innerHTML = '<div class="empty-list">正在读取目录…</div>';
+  $('#threadCopyStatus').textContent = '';
+  $('#threadCopyDialog').showModal();
+  setThreadCopyBusy(false);
+  browseThreadCopyDirectories(initialPath).catch((error) => toast(error.message, 'error'));
+}
+
+function closeThreadCopyDialog() {
+  if (state.threadCopy?.busy) return;
+  stopThreadCopyElapsed();
+  state.threadCopy = null;
+  $('#threadCopyDialog').close();
+}
+
+async function confirmThreadCopy() {
+  const copy = state.threadCopy;
+  if (!copy || copy.busy) return;
+  const name = $('#threadCopyName').value.trim();
+  if (!name) {
+    toast('副本名称不能为空', 'error');
+    $('#threadCopyName').focus();
+    return;
+  }
+  if (!copy.path) {
+    toast('请选择目标目录', 'error');
+    return;
+  }
+  setThreadCopyBusy(true);
+  startThreadCopyElapsed(copy);
+  setThreadCopyProgress('正在提交复制请求');
+  try {
+    const result = await post(`/api/threads/${encodeURIComponent(copy.source.id)}/copy`, {
+      cwd: copy.path,
+      name,
+      requestId: copy.requestId,
+    });
+    const copiedThread = result.thread;
+    if (!copiedThread?.id) throw new Error('服务端未返回副本会话');
+    state.threadCache.delete(copiedThread.id);
+    stopThreadCopyElapsed(copy);
+    state.threadCopy = null;
+    $('#threadCopyDialog').close();
+    await openThread(copiedThread.id, { history: 'push' });
+    await loadThreads().catch((error) => debug.log('thread-copy', 'list-refresh-failed', { message: error.message }));
+    toast('会话已复制到目标目录');
+  } catch (error) {
+    if (state.threadCopy !== copy) return;
+    stopThreadCopyElapsed(copy);
+    setThreadCopyBusy(false);
+    setThreadCopyProgress(error.message, true);
+    toast(error.message, 'error');
+  }
 }
 
 function openThreadRenameDialog() {
@@ -1687,7 +1937,6 @@ async function openThread(threadId, options = {}) {
     state.threadOpenedAt = Date.now();
     updateLoadOlderButton();
     void markThreadRead(threadId);
-    post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
     loadArtifacts(threadId).then(() => {
       const entry = state.threadCache.get(threadId);
       if (!entry || state.currentThread?.id !== threadId) return;
@@ -1724,7 +1973,6 @@ async function openThread(threadId, options = {}) {
     });
     applyThreadData(read.thread, turns, seq);
     updateLoadOlderButton();
-    post(`/api/threads/${encodeURIComponent(threadId)}/resume`).catch((error) => toast(`会话恢复失败：${error.message}`, 'error'));
     try {
       await loadArtifacts(threadId);
       const entry = state.threadCache.get(threadId);
@@ -2991,6 +3239,11 @@ function connectEvents() {
   });
   events.addEventListener('backend-changed', (event) => {
     const data = JSON.parse(event.data);
+    const eventAt = Date.parse(data.at ?? '');
+    if (Number.isFinite(eventAt) && eventAt < subscribedAt - 1000) {
+      debug.log('backend', 'ignored-stale-change', { active: data.active, eventAt, subscribedAt });
+      return;
+    }
     if (state.backendSwitching || !data.active || data.active === activeBackendId()) return;
     showStartup('Agent 已切换，正在刷新会话…');
     state.events?.close();
@@ -3018,7 +3271,18 @@ function connectEvents() {
       toast(`${name}：${label}`);
     }
   });
-  events.addEventListener('codex', (event) => handleCodex(JSON.parse(event.data)));
+  events.addEventListener('thread-copy-progress', (event) => {
+    const progress = JSON.parse(event.data);
+    if (!state.threadCopy?.busy || progress.requestId !== state.threadCopy.requestId) return;
+    setThreadCopyProgress(progress.label || '正在复制会话', progress.stage === 'failed');
+  });
+  events.addEventListener('codex', (event) => {
+    const message = JSON.parse(event.data);
+    if (message.method === 'account/rateLimits/updated' && $('#settingsSheet').open) {
+      loadAccountStatus({ silent: true }).catch(() => {});
+    }
+    handleCodex(message);
+  });
   events.addEventListener('approval', (event) => {
     const request = JSON.parse(event.data);
     if (state.resolvingApprovalIds.has(request.id) || state.resolvedApprovalIds.has(request.id)) return;
@@ -3140,8 +3404,12 @@ $('#timeline').addEventListener('click', async (event) => {
   toast('问题已复制');
 });
 $('#jumpQuestionButton').addEventListener('click', jumpToLatestQuestion);
-$('#settingsButton').addEventListener('click', () => $('#settingsSheet').showModal());
+$('#settingsButton').addEventListener('click', () => {
+  $('#settingsSheet').showModal();
+  loadAccountStatus().catch(() => {});
+});
 $('#closeSettingsButton').addEventListener('click', () => $('#settingsSheet').close());
+$('#refreshAccountStatusButton').addEventListener('click', () => loadAccountStatus().catch(() => {}));
 $('#skillButton').addEventListener('click', openSkillSheet);
 $('#closeSkillButton').addEventListener('click', () => $('#skillSheet').close());
 $('#closeThreadActionButton').addEventListener('click', closeThreadActionDialog);
@@ -3151,6 +3419,7 @@ $('#chatThreadMoreButton').addEventListener('click', () => {
   if (state.currentThread) openThreadActionDialog(state.currentThread, 'chat');
 });
 $('#threadArtifactsAction').addEventListener('click', openThreadArtifactsAction);
+$('#threadCopyAction').addEventListener('click', openThreadCopyDialog);
 $('#threadRenameAction').addEventListener('click', openThreadRenameDialog);
 $('#threadDeleteAction').addEventListener('click', confirmThreadDelete);
 $('#threadDeleteCancel').addEventListener('click', () => { $('#threadDeleteConfirm').hidden = true; });
@@ -3162,6 +3431,25 @@ $('#threadRenameInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.isComposing) {
     event.preventDefault();
     confirmThreadRename();
+  }
+});
+$('#closeThreadCopyButton').addEventListener('click', closeThreadCopyDialog);
+$('#cancelThreadCopyButton').addEventListener('click', closeThreadCopyDialog);
+$('#threadCopyUpButton').addEventListener('click', () => {
+  if (state.threadCopy?.parent) browseThreadCopyDirectories(state.threadCopy.parent);
+});
+$('#confirmThreadCopyButton').addEventListener('click', confirmThreadCopy);
+$('#threadCopyName').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.isComposing) {
+    event.preventDefault();
+    confirmThreadCopy();
+  }
+});
+$('#threadCopyDialog').addEventListener('cancel', (event) => {
+  if (state.threadCopy?.busy) event.preventDefault();
+  else {
+    stopThreadCopyElapsed();
+    state.threadCopy = null;
   }
 });
 $('#promptInput').addEventListener('keydown', (event) => {

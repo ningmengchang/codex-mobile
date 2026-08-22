@@ -8,6 +8,14 @@ import { createPairingCode } from '../server/auth.mjs';
 import { createCodexMobileServer } from '../server/index.mjs';
 import { createArtifactToken } from '../server/security.mjs';
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('等待测试条件超时');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 class FakeBridge extends EventEmitter {
   constructor() {
     super();
@@ -20,6 +28,12 @@ class FakeBridge extends EventEmitter {
     this.threadList = [];
     this.threadListNextCursor = null;
     this.reconfigurations = [];
+    this.restartCount = 0;
+    this.rejectDuplicateResumes = false;
+    this.resumedThreads = new Set();
+    this.activeWriterThreads = new Set();
+    this.dynamicThreads = new Map();
+    this.forkCount = 0;
   }
   status() { return { ready: true, pid: 123, pendingRequests: 0 }; }
   getServerRequests() {
@@ -35,9 +49,26 @@ class FakeBridge extends EventEmitter {
     this.reconfigurations.push(runtime);
     return this.status();
   }
+  async restart() {
+    this.restartCount += 1;
+    this.resumedThreads.clear();
+    this.emit('status', { ready: false, pid: null, pendingRequests: 0 });
+    this.emit('status', this.status());
+    return this.status();
+  }
   async request(method, params) {
     this.calls.push({ method, params });
-    if (method === 'account/read') return { account: { type: 'chatgpt' } };
+    if (method === 'account/read') return { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true };
+    if (method === 'account/rateLimits/read') return {
+      rateLimits: {
+        limitId: 'codex', limitName: null,
+        primary: { usedPercent: 23, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+        secondary: { usedPercent: 61, windowDurationMins: 10_080, resetsAt: 1_800_600_000 },
+        rateLimitReachedType: null,
+      },
+      rateLimitsByLimitId: null,
+      rateLimitResetCredits: { availableCount: 1, credits: null },
+    };
     if (method === 'model/list') return { data: [{ id: 'test-model', displayName: 'Test', isDefault: true }] };
     if (method === 'collaborationMode/list') return { data: [
       { name: 'Plan', mode: 'plan', model: null, reasoning_effort: 'medium' },
@@ -45,12 +76,14 @@ class FakeBridge extends EventEmitter {
     ] };
     if (method === 'thread/list') {
       this.lastThreadListParams = params;
-      return { data: this.threadList, nextCursor: this.threadListNextCursor };
+      const dynamic = [...this.dynamicThreads.values()]
+        .filter((thread) => !params.cwd || thread.cwd === params.cwd);
+      return { data: [...dynamic, ...this.threadList], nextCursor: this.threadListNextCursor };
     }
     if (method === 'thread/start') return { thread: {
       id: this.nextThreadId ?? 'thread-1', cwd: params.cwd, turns: [], preview: '', status: 'idle', updatedAt: 1,
     }, cwd: params.cwd };
-    if (method === 'thread/read') return { thread: {
+    if (method === 'thread/read') return { thread: this.dynamicThreads.get(params.threadId) ?? {
       id: params.threadId, cwd: this.project, turns: [], preview: '', status: 'idle', updatedAt: 1,
     } };
     if (method === 'thread/turns/list') {
@@ -59,16 +92,40 @@ class FakeBridge extends EventEmitter {
     }
     if (method === 'thread/name/set') {
       this.lastSetName = params;
-      return { thread: { id: params.threadId, name: params.name, cwd: this.project, turns: [], preview: '', status: 'idle', updatedAt: 2 } };
+      const existing = this.dynamicThreads.get(params.threadId);
+      const thread = { ...(existing ?? { id: params.threadId, cwd: this.project, turns: [], preview: '', status: 'idle' }), name: params.name, updatedAt: 2 };
+      if (existing) this.dynamicThreads.set(params.threadId, thread);
+      return { thread };
     }
     if (method === 'thread/delete') {
       this.lastDelete = params;
+      this.dynamicThreads.delete(params.threadId);
       return { deleted: true };
+    }
+    if (method === 'thread/unsubscribe') {
+      this.resumedThreads.delete(params.threadId);
+      return { status: 'unsubscribed' };
+    }
+    if (method === 'thread/fork') {
+      this.forkCount += 1;
+      const thread = {
+        id: `fork-${params.threadId}-${this.forkCount}`, forkedFromId: params.threadId, cwd: params.cwd,
+        turns: [], preview: '', status: 'idle', updatedAt: 2,
+      };
+      this.dynamicThreads.set(thread.id, thread);
+      return { thread, cwd: params.cwd };
     }
     if (method === 'thread/resume') {
       if (this.failRollout && params.threadId === this.failRollout) {
         throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: 'THREAD_NOT_FOUND' });
       }
+      if (this.rejectDuplicateResumes && this.resumedThreads.has(params.threadId)) {
+        throw new Error(`thread ${params.threadId} already has an active writer`);
+      }
+      if (this.activeWriterThreads.has(params.threadId)) {
+        throw new Error(`thread ${params.threadId} already has an active writer`);
+      }
+      this.resumedThreads.add(params.threadId);
       return { thread: {
       id: params.threadId, cwd: this.project, turns: [], preview: '', status: 'idle', updatedAt: 1,
     }, cwd: this.project };
@@ -76,6 +133,12 @@ class FakeBridge extends EventEmitter {
     if (method === 'turn/start') {
       if (this.failRollout && params.threadId === this.failRollout) {
         throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: 'THREAD_NOT_FOUND' });
+      }
+      if (params.threadId === 'thread-history') {
+        return { turn: { id: 'turn-history', status: 'inProgress', items: [] } };
+      }
+      if (params.threadId === 'fork-thread-locked') {
+        return { turn: { id: 'turn-forked', status: 'inProgress', items: [] } };
       }
       return { turn: { id: `turn-${++this.turn}`, status: 'inProgress', items: [] } };
     }
@@ -87,9 +150,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mobile-server-'));
   const root = path.join(directory, 'projects');
   const project = path.join(root, 'demo');
+  const copyTarget = path.join(root, 'copy-target');
   const dataDir = path.join(directory, 'data');
   const cacheDir = path.join(directory, 'cache');
   fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(copyTarget, { recursive: true });
   fs.mkdirSync(dataDir);
   fs.mkdirSync(cacheDir);
   const skillsRoot = path.join(directory, 'skills');
@@ -187,6 +252,7 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const app = createCodexMobileServer({
     config,
     bridge,
+    writerRecycleDelayMs: 5,
     dingtalk,
     skillMarket,
     convertOfficeToPdf: async (filePath) => {
@@ -217,11 +283,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   try {
-    const appScript = await fetch(`${base}/app.js?v=106`);
+    const appScript = await fetch(`${base}/app.js?v=110`);
     assert.equal(appScript.status, 200);
     assert.equal(appScript.headers.get('cache-control'), 'no-cache');
     const appShell = await fetch(`${base}/`);
-    assert.equal((await appShell.text()).includes('/app.js?v=106'), true);
+    assert.equal((await appShell.text()).includes('/app.js?v=110'), true);
     const denied = await fetch(`${base}/api/bootstrap`);
     assert.equal(denied.status, 401);
     const pairing = createPairingCode(config);
@@ -234,6 +300,14 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(bootstrap.status, 200);
     const payload = await bootstrap.json();
     assert.equal(payload.runtime.user, os.userInfo().username);
+    const accountStatus = await fetch(`${base}/api/account/status`, { headers: { Cookie: cookie } });
+    assert.equal(accountStatus.status, 200);
+    const accountStatusPayload = await accountStatus.json();
+    assert.equal(accountStatusPayload.available, true);
+    assert.equal(accountStatusPayload.account.planType, 'pro');
+    assert.equal(accountStatusPayload.rateLimits.primary.usedPercent, 23);
+    assert.equal(accountStatusPayload.rateLimits.secondary.windowDurationMins, 10_080);
+    assert.equal(accountStatusPayload.rateLimitResetCredits.availableCount, 1);
     assert.equal(payload.defaultModel, 'pinned-model');
     assert.equal(payload.defaultEffort, 'max');
     assert.deepEqual(payload.favorites, []);
@@ -417,6 +491,42 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     });
     assert.equal(created.status, 201);
     assert(bridge.calls.some((call) => call.method === 'thread/start' && call.params.cwd === project && call.params.model === 'pinned-model'));
+    bridge.rejectDuplicateResumes = true;
+    const historicalResume = await fetch(`${base}/api/threads/thread-history/resume`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(historicalResume.status, 200);
+    const repeatedResume = await fetch(`${base}/api/threads/thread-history/resume`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(repeatedResume.status, 200);
+    assert.equal(bridge.calls.filter((call) => call.method === 'thread/resume' && call.params.threadId === 'thread-history').length, 0);
+    assert.equal(bridge.calls.filter((call) => call.method === 'thread/read' && call.params.threadId === 'thread-history').length, 2);
+    const historicalTurn = await fetch(`${base}/api/threads/thread-history/turns`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
+        cwd: project, text: '恢复后发送', mode: 'default', approvalsReviewer: 'auto_review',
+      }),
+    });
+    assert.equal(historicalTurn.status, 201);
+    assert.equal(bridge.calls.filter((call) => call.method === 'thread/resume' && call.params.threadId === 'thread-history').length, 1);
+    bridge.rejectDuplicateResumes = false;
+    bridge.activeWriterThreads.add('thread-locked');
+    const lockedResume = await fetch(`${base}/api/threads/thread-locked/resume`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(lockedResume.status, 200);
+    assert.equal((await lockedResume.json()).readOnly, true);
+    const lockedTurn = await fetch(`${base}/api/threads/thread-locked/turns`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
+        cwd: project, text: '从手机继续', mode: 'default', approvalsReviewer: 'auto_review',
+      }),
+    });
+    assert.equal(lockedTurn.status, 409);
+    const lockedPayload = await lockedTurn.json();
+    assert.equal(lockedPayload.error, 'THREAD_ACTIVE_WRITER');
+    assert.match(lockedPayload.message, /终端或另一个 Codex 进程/);
+    assert.equal(bridge.calls.some((call) => call.method === 'thread/fork' && call.params.threadId === 'thread-locked'), false);
+    bridge.activeWriterThreads.clear();
     const planned = await fetch(`${base}/api/threads/thread-1/turns`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
         cwd: project, text: '先制定方案', mode: 'plan', approvalsReviewer: 'user',
@@ -526,6 +636,8 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
       method: 'turn/completed',
       params: { threadId: 'thread-1', turn: { id: 'turn-4', status: 'completed' } },
     });
+    await waitFor(() => bridge.calls.some((call) => call.method === 'thread/unsubscribe' && call.params.threadId === 'thread-1'));
+    assert.equal(bridge.restartCount, 0);
     const activityRead = await fetch(`${base}/api/threads/thread-1`, { headers: { Cookie: cookie } });
     assert.equal(activityRead.status, 200);
     assert.equal((await activityRead.json()).thread.activity.status, 'completed');
@@ -547,6 +659,15 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(recoveredPayload.recreated, true);
     assert.equal(recoveredPayload.turn.id, 'turn-5');
     assert(bridge.calls.some((call) => call.method === 'thread/start' && call.params.cwd === project && call.params.model === 'test-model'));
+    bridge.emit('notification', {
+      method: 'turn/completed',
+      params: { threadId: 'thread-history', turn: { id: 'turn-history', status: 'completed' } },
+    });
+    bridge.emit('notification', {
+      method: 'turn/completed',
+      params: { threadId: 'thread-recreated', turn: { id: 'turn-5', status: 'completed' } },
+    });
+    await waitFor(() => bridge.restartCount === 1);
     const escaped = await fetch(`${base}/api/threads`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: '/' }),
     });
@@ -580,6 +701,53 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const favorites = await fetch(`${base}/api/favorites`, { headers: { Cookie: cookie } });
     assert.equal(favorites.status, 200);
     assert.equal((await favorites.json()).data.length, 2);
+    const copied = await fetch(`${base}/api/threads/thread-copy/copy`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: copyTarget, name: '可用副本', requestId: 'copy-test-0001' }),
+    });
+    assert.equal(copied.status, 201);
+    const copiedPayload = await copied.json();
+    assert.equal(copiedPayload.copied, true);
+    assert.equal(copiedPayload.replayed, false);
+    assert.equal(copiedPayload.thread.cwd, copyTarget);
+    assert.equal(copiedPayload.thread.name, '可用副本');
+    assert.notEqual(copiedPayload.thread.id, 'thread-copy');
+    assert.deepEqual(
+      app.hub.history.filter((event) => event.type === 'thread-copy-progress'
+        && event.data.requestId === 'copy-test-0001').map((event) => event.data.stage),
+      ['reading', 'forking', 'naming', 'history', 'directory', 'completed'],
+    );
+    const forkCall = bridge.calls.find((call) => call.method === 'thread/fork' && call.params.threadId === 'thread-copy');
+    assert.equal(forkCall.params.cwd, copyTarget);
+    assert.deepEqual(forkCall.params.runtimeWorkspaceRoots, [copyTarget]);
+    assert.equal(forkCall.params.excludeTurns, true);
+    assert.equal(forkCall.params.deferGoalContinuation, true);
+    assert(bridge.calls.some((call) => call.method === 'thread/unsubscribe' && call.params.threadId === copiedPayload.thread.id));
+    const copiedReplay = await fetch(`${base}/api/threads/thread-copy/copy`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: copyTarget, name: '可用副本', requestId: 'copy-test-0001' }),
+    });
+    assert.equal(copiedReplay.status, 200);
+    assert.equal((await copiedReplay.json()).thread.id, copiedPayload.thread.id);
+    assert.equal(bridge.calls.filter((call) => call.method === 'thread/fork' && call.params.threadId === 'thread-copy').length, 1);
+    const invalidCopyRequest = await fetch(`${base}/api/threads/thread-copy/copy`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: copyTarget, name: '副本', requestId: 'short' }),
+    });
+    assert.equal(invalidCopyRequest.status, 400);
+    const escapedCopy = await fetch(`${base}/api/threads/thread-copy/copy`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: '/', name: '副本', requestId: 'copy-test-0002' }),
+    });
+    assert.equal(escapedCopy.status, 403);
+    app.threadActivity.start('thread-copy-busy', 'turn-copy-busy', 'default');
+    const busyCopy = await fetch(`${base}/api/threads/thread-copy-busy/copy`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: copyTarget, name: '副本', requestId: 'copy-test-0003' }),
+    });
+    assert.equal(busyCopy.status, 409);
+    assert.equal((await busyCopy.json()).error, 'THREAD_COPY_BUSY');
+    app.threadActivity.complete('thread-copy-busy', 'turn-copy-busy', 'completed');
     const renamed = await fetch(`${base}/api/threads/thread-1/name`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '新名字' }),
     });

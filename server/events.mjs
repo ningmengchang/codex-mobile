@@ -27,8 +27,14 @@ export class EventHub {
       'X-Accel-Buffering': 'no',
     });
     response.write(': connected\n\n');
-    for (const event of this.history) {
-      if (event.id > lastEventId) response.write(this.encode(event));
+    // A brand-new page has no Last-Event-ID and already receives current state
+    // from /api/bootstrap. Replaying the whole process history here can make a
+    // stale backend-changed event reload the page forever. Only reconnecting
+    // EventSource clients should receive events missed after their last ID.
+    if (lastEventId > 0) {
+      for (const event of this.history) {
+        if (event.id > lastEventId) response.write(this.encode(event));
+      }
     }
     this.clients.add(response);
     const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15_000);

@@ -35,6 +35,7 @@ try {
   const page = await context.newPage();
   let createdThreads = 0;
   let createdThreadCwd = null;
+  let accountStatusReads = 0;
   await page.route('**/*', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const method = route.request().method();
@@ -44,6 +45,19 @@ try {
     if (pathname === '/api/auth/status') return fulfillJson({ authenticated: true });
     if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
+    if (pathname === '/api/account/status') {
+      accountStatusReads += 1;
+      return fulfillJson({
+        backend: 'gpt', available: true,
+        account: { type: 'chatgpt', planType: 'pro' },
+        rateLimits: {
+          limitId: 'codex', limitName: null,
+          primary: { usedPercent: 23, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+          secondary: { usedPercent: 61, windowDurationMins: 10_080, resetsAt: 1_800_600_000 },
+        },
+        rateLimitsByLimitId: null,
+      });
+    }
     if (pathname === '/api/projects') return fulfillJson(bootstrap.projects);
     if (pathname === '/api/threads' && method === 'GET') return fulfillJson({ data: [] });
     if (pathname === '/api/threads' && method === 'POST') {
@@ -211,6 +225,20 @@ try {
   await page.locator('#projectsView.active').waitFor({ timeout: 10_000 });
   await page.locator('#settingsButton').click();
   await page.locator('#settingsSheet[open]').waitFor({ timeout: 10_000 });
+  await page.waitForFunction(() => document.querySelectorAll('#accountQuotaList .account-quota-item').length === 2);
+  const quotaStatus = await page.evaluate(() => ({
+    text: document.querySelector('#accountQuotaList').textContent,
+    plan: document.querySelector('#accountQuotaPlan').textContent,
+    values: [...document.querySelectorAll('#accountQuotaList [role="progressbar"]')].map((item) => item.getAttribute('aria-valuenow')),
+  }));
+  if (!quotaStatus.text.includes('5 小时额度') || !quotaStatus.text.includes('77% 剩余')
+    || !quotaStatus.text.includes('每周额度') || !quotaStatus.text.includes('39% 剩余')
+    || quotaStatus.plan !== 'ChatGPT · PRO' || quotaStatus.values.join(',') !== '77,39') {
+    throw new Error(`Codex 额度没有正确显示：${JSON.stringify(quotaStatus)}`);
+  }
+  await page.locator('#refreshAccountStatusButton').click();
+  await page.waitForFunction(() => !document.querySelector('#refreshAccountStatusButton').disabled);
+  if (accountStatusReads !== 2) throw new Error(`额度刷新没有重新请求：${accountStatusReads}`);
 
   // 5) 深浅主题可以切换，并在刷新后保留。
   const initialTheme = await page.evaluate(() => ({
@@ -263,7 +291,7 @@ try {
     || await page.evaluate(() => location.hash) !== '#chat/thread-new') {
     throw new Error(`负一屏新增会话未使用当前目录进入聊天：${createdThreads} / ${createdThreadCwd} / ${await page.evaluate(() => location.hash)}`);
   }
-  process.stdout.write(`${JSON.stringify({ homeLayout, fileScreenLayout, initialTheme, lightTheme, persistedTheme, createdThreads, createdThreadCwd })}\n`);
+  process.stdout.write(`${JSON.stringify({ homeLayout, fileScreenLayout, quotaStatus, accountStatusReads, initialTheme, lightTheme, persistedTheme, createdThreads, createdThreadCwd })}\n`);
 } finally {
   await browser.close();
 }

@@ -56,6 +56,7 @@ try {
     window.__boot = boot;
   }, bootstrap);
   const page = await context.newPage();
+  let resumeRequests = 0;
   await page.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     const pathname = url.pathname;
@@ -70,7 +71,10 @@ try {
     if (pathname === `/api/threads/${threadId}` && route.request().method() === 'GET') {
       return fulfillJson({ thread: threadMeta });
     }
-    if (pathname === `/api/threads/${threadId}/resume`) return fulfillJson({ thread: threadMeta });
+    if (pathname === `/api/threads/${threadId}/resume`) {
+      resumeRequests += 1;
+      return fulfillJson({ thread: threadMeta });
+    }
     if (pathname === `/api/threads/${threadId}/turns` && route.request().method() === 'GET') {
       const pageSize = Number.parseInt(url.searchParams.get('pageSize') ?? '20', 10);
       const offset = Number.parseInt(url.searchParams.get('cursor') ?? '0', 10);
@@ -96,6 +100,7 @@ try {
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.waitForFunction(() => document.querySelectorAll('#timeline [data-turn]').length === 20, null, { timeout: 15_000 });
   await page.waitForTimeout(200);
+  if (resumeRequests !== 0) throw new Error(`只读打开会话不应请求 resume，实际请求 ${resumeRequests} 次`);
 
   // 1) 新回合追加在底部，旧内容上移，滚动保持底部
   await page.evaluate(() => {
