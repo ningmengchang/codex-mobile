@@ -22,7 +22,7 @@ export async function fetchTurnPage(threadId, options = {}) {
   return { turnsAsc: [...data].reverse(), nextCursor: result.nextCursor ?? null };
 }
 
-export function sameTurn(left, right) {
+function sameTurn(left, right) {
   return left.status === right.status && (left.items ?? []).length === (right.items ?? []).length;
 }
 
@@ -73,7 +73,7 @@ export function isToolItem(item) {
   return !MAIN_ITEM_TYPES.has(item.type);
 }
 
-export function itemContentKey(item) {
+function itemContentKey(item) {
   if (!item) return null;
   if (item.type === 'userMessage') {
     const text = (item.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n').trim();

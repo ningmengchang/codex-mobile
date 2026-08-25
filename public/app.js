@@ -3,9 +3,10 @@ import { api, post } from './js/http.js';
 import { escapeHtml, markdown, formatBytes, formatTime, formatDateTime, escapeAttribute } from './js/format.js';
 import { renderMermaid, setMermaidTheme } from './js/mermaid-renderer.js';
 import { initKeyboardInsets } from './js/keyboard.js';
-import { initDingtalk, initFileShare, loadDingtalkMessages, openFileShare, startDingtalkPolling, stopDingtalkPolling } from './js/dingtalk.js';
+import { initFileShare, openFileShare } from './js/dingtalk.js';
 import { initSkillMarket } from './js/skill-market.js';
 import { debug } from './js/debug.js';
+import { completedRuntimeActivity } from './js/turn-state.js';
 import {
   state,
   UI_STATE,
@@ -13,23 +14,14 @@ import {
 import {
   fetchTurnPage,
   mergeTurns,
-  sameTurn,
-  isToolItem,
-  itemContentKey,
   dedupeItems,
   ensureTurn,
   upsertItem,
   cacheThread,
   isDocumentArtifact,
   artifactSortTime,
-  buildTurnArtifactIndex,
-  turnArtifactsHtml,
-  itemInnerHtml,
-  itemHtml,
-  turnSectionHtml,
 } from './js/chat-core.js';
 import {
-  userMessagesNewestFirst,
   updateJumpButton,
   jumpToLatestQuestion,
   renderModeControls,
@@ -39,13 +31,10 @@ import {
   updateLoadOlderButton,
   showThreadLoading,
   hideThreadLoading,
-  finishTimelineRender,
-  renderTimelineChunked,
   renderTimeline,
   updateTimelineItem,
   appendTurnSection,
   updateTurnArtifactsStrips,
-  prependTurnSections,
   loadOlderTurns,
   initChatScroll,
 } from './js/chat-view.js';
@@ -216,9 +205,19 @@ function storedForBackend(key, storage = localStorage) {
   return activeBackendId() === 'gpt' ? storage.getItem(key) : null;
 }
 
+function migrateBackendPreference(key) {
+  const scopedKey = backendStorageKey(key);
+  const scoped = localStorage.getItem(scopedKey);
+  if (activeBackendId() !== 'gpt') return scoped;
+  const legacy = localStorage.getItem(key);
+  if (scoped == null && legacy != null) localStorage.setItem(scopedKey, legacy);
+  localStorage.removeItem(key);
+  return scoped ?? legacy;
+}
+
 function loadBackendPreferences() {
-  state.model = storedForBackend('codex-mobile-model');
-  state.effort = storedForBackend('codex-mobile-effort');
+  state.model = migrateBackendPreference('codex-mobile-model');
+  state.effort = migrateBackendPreference('codex-mobile-effort');
 }
 
 function isCompactNavigation() {
@@ -543,30 +542,6 @@ function setCurrentProjectDirectory(projectPath, options = {}) {
     updateLoadOlderButton();
   }
   return changed;
-}
-
-async function selectProject(projectPath, userInitiated = true) {
-  try {
-    setCurrentProjectDirectory(projectPath, { clearConversation: userInitiated });
-    await loadThreads();
-    if (userInitiated) {
-      if (state.pendingCodexMessage) {
-        const draft = state.pendingCodexMessage;
-        state.pendingCodexMessage = null;
-        if (!state.currentThread) await newThread();
-        if (!state.currentThread) return;
-        showTab('chat', { history: 'push', threadId: state.currentThread.id });
-        $('#promptInput').value = draft;
-        resizeComposer();
-        $('#promptInput').focus();
-      } else {
-        showTab('threads', { history: 'push' });
-      }
-    }
-  } catch (error) {
-    state.currentProject = state.bootstrap?.projects?.current?.path ?? null;
-    toast(error.message, 'error');
-  }
 }
 
 let projectBrowseSeq = 0;
@@ -2124,13 +2099,6 @@ function insertSkill(name) {
   input.focus();
 }
 
-function terminalActivityStatus(value) {
-  const status = String(value ?? '').toLowerCase();
-  if (status.includes('fail') || status.includes('error')) return 'failed';
-  if (status.includes('interrupt') || status.includes('cancel') || status.includes('stop')) return 'interrupted';
-  return 'completed';
-}
-
 function applyCodexRuntimeEvent(method, params, threadId, turnId) {
   if (!threadId) return;
   const previous = state.threadRuntimeById.get(threadId) ?? {
@@ -2149,19 +2117,11 @@ function applyCodexRuntimeEvent(method, params, threadId, turnId) {
       updatedAt: Date.now(),
     });
   } else if (method === 'turn/completed') {
-    const status = terminalActivityStatus(params.turn?.status ?? params.status);
-    const alreadyTerminal = ['completed', 'failed', 'interrupted'].includes(previous.status)
-      && !previous.activeTurnId;
-    applyThreadActivity({
-      ...previous,
+    applyThreadActivity(completedRuntimeActivity(previous, {
       threadId,
-      status,
-      phase: null,
-      activeTurnId: null,
-      unreadCount: alreadyTerminal ? (previous.unreadCount ?? 0) : (previous.unreadCount ?? 0) + 1,
-      completedAt: Date.now(),
-      updatedAt: Date.now(),
-    });
+      turnId: params.turn?.id ?? turnId,
+      status: params.turn?.status ?? params.status,
+    }));
   }
 }
 
@@ -3181,12 +3141,6 @@ function showTab(name, options = {}) {
     loadArtifacts().catch((error) => toast(error.message, 'error'));
   }
   if (name === 'projects') openDefaultFileBrowser();
-  if (name === 'dingtalk') {
-    loadDingtalkMessages(true).catch((error) => toast(error.message, 'error'));
-    startDingtalkPolling();
-  } else {
-    stopDingtalkPolling();
-  }
   updateJumpButton();
   saveUiState();
 }
@@ -3550,7 +3504,6 @@ $('#refreshArtifactsButton').addEventListener('click', () => loadArtifacts().cat
 $('#loadOlderButton').addEventListener('click', () => loadOlderTurns().catch((error) => toast(error.message, 'error')));
 initChatScroll();
 initKeyboardInsets();
-initDingtalk(showTab);
 initFileShare();
 initSkillMarket({
   refreshInstalled: async () => {

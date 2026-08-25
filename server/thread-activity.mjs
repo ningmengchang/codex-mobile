@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const DEFAULT_LIMIT = 2000;
 
 function finiteTime(value, fallback = null) {
@@ -60,6 +60,11 @@ function normalizeStoredEntry(value) {
     lastCompletionTurnId: typeof value.lastCompletionTurnId === 'string' && value.lastCompletionTurnId
       ? value.lastCompletionTurnId
       : null,
+    lastCompletionPhase: value.lastCompletionPhase === 'plan'
+      ? 'plan'
+      : value.lastCompletionPhase === 'default'
+        ? 'default'
+        : null,
     completedAt: finiteTime(value.completedAt),
     updatedAt: finiteTime(value.updatedAt, Date.now()),
   };
@@ -102,6 +107,7 @@ export class ThreadActivityStore {
         unreadCount: 0,
         lastTerminalStatus: null,
         lastCompletionTurnId: null,
+        lastCompletionPhase: null,
         completedAt: null,
         updatedAt: Date.now(),
       };
@@ -148,6 +154,8 @@ export class ThreadActivityStore {
         attentionCount: 0,
         unreadCount: 0,
         lastTerminalStatus: null,
+        lastCompletionTurnId: null,
+        lastCompletionPhase: null,
         completedAt: null,
         updatedAt: null,
       };
@@ -165,6 +173,8 @@ export class ThreadActivityStore {
       attentionCount,
       unreadCount: entry?.unreadCount ?? 0,
       lastTerminalStatus: entry?.lastTerminalStatus ?? null,
+      lastCompletionTurnId: entry?.lastCompletionTurnId ?? null,
+      lastCompletionPhase: entry?.lastCompletionPhase ?? null,
       completedAt: entry?.completedAt ?? null,
       updatedAt: entry?.updatedAt ?? null,
     };
@@ -216,6 +226,7 @@ export class ThreadActivityStore {
     const completionTurnId = typeof turnId === 'string' && turnId ? turnId : null;
     const duplicate = completionTurnId && entry.lastCompletionTurnId === completionTurnId;
     const nextTerminalStatus = normalizeTerminalStatus(status);
+    const completionPhase = entry.phase === 'plan' ? 'plan' : entry.phase === 'default' ? 'default' : null;
     entry.status = 'idle';
     entry.phase = null;
     entry.activeTurnId = null;
@@ -223,6 +234,7 @@ export class ThreadActivityStore {
       ? entry.lastTerminalStatus
       : nextTerminalStatus;
     entry.lastCompletionTurnId = completionTurnId ?? entry.lastCompletionTurnId;
+    if (!duplicate && completionPhase) entry.lastCompletionPhase = completionPhase;
     entry.completedAt = finiteTime(at, Date.now());
     entry.updatedAt = entry.completedAt;
     if (!duplicate) entry.unreadCount += 1;

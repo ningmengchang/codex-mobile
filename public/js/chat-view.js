@@ -13,6 +13,7 @@ import { escapeAttribute } from './format.js';
 import { state, CHUNKED_TURN_THRESHOLD, CHUNKED_ITEM_THRESHOLD, CHUNK_TURNS_PER_FRAME } from './state.js';
 import { renderMermaid } from './mermaid-renderer.js';
 import { debug } from './debug.js';
+import { planDecisionReady } from './turn-state.js';
 import { showThreadLoading, hideThreadLoading, updateThreadLoadingProgress } from './loading.js';
 export { showThreadLoading, hideThreadLoading, updateThreadLoadingProgress };
 import {
@@ -34,7 +35,7 @@ let olderScrollQueued = false;
 let lastScrollTop = 0;
 let scrollListenersBound = false;
 
-export function setScrollTopInstant(scrollEl, top) {
+function setScrollTopInstant(scrollEl, top) {
   const behavior = scrollEl.style.scrollBehavior;
   scrollEl.style.scrollBehavior = 'auto';
   scrollEl.scrollTop = top;
@@ -63,7 +64,7 @@ export function updateLoadOlderButton() {
   button.textContent = state.turnsLoadingOlder ? '正在加载…' : '加载更早历史 ↑';
 }
 
-export function userMessagesNewestFirst() {
+function userMessagesNewestFirst() {
   const messages = [];
   for (let turnIndex = state.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const items = state.turns[turnIndex]?.items ?? [];
@@ -133,12 +134,15 @@ export function renderModeControls() {
 
 export function renderPlanDecision() {
   const bar = $('#planDecisionBar');
-  const lastCompleted = [...state.turns].reverse().find((turn) => turn.status === 'completed');
-  const planReady = Boolean(lastCompleted?.items?.some((item) => item.type === 'plan' || item.type === 'structuredPlan'));
-  bar.hidden = Boolean(state.activeTurnId) || !planReady;
+  const activity = state.currentThread?.activity ?? state.threadRuntimeById.get(state.currentThread?.id);
+  bar.hidden = Boolean(state.activeTurnId) || !planDecisionReady({
+    turns: state.turns,
+    turnModes: state.turnModes,
+    activity,
+  });
 }
 
-export function finishTimelineRender(scroll, existingKeys = null) {
+function finishTimelineRender(scroll, existingKeys = null) {
   debug.log('timeline', 'finish', { version: state.timelineVersion });
   const timeline = $('#timeline');
   const hiding = timeline.classList.contains('timeline-rendering');
@@ -163,7 +167,7 @@ export function finishTimelineRender(scroll, existingKeys = null) {
   void renderMermaid(timeline).catch(() => {});
 }
 
-export function renderTimelineChunked(scroll) {
+function renderTimelineChunked(scroll) {
   debug.log('timeline', 'chunked-start', { turns: state.turns.length });
   const jobId = ++timelineRenderJobId;
   timelineRenderBusy = true;
@@ -331,7 +335,7 @@ export function updateTimelineItem(turnId, item) {
   scrollTimelineToBottom();
 }
 
-export function prependTurnSections(turnsAsc) {
+function prependTurnSections(turnsAsc) {
   const timeline = $('#timeline');
   const first = timeline.querySelector('[data-turn]');
   if (!first) {

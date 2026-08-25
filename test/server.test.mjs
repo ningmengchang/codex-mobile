@@ -170,7 +170,6 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const outputFile = path.join(outputDirectory, '最终报告.md');
   const relatedPngPath = path.join(project, 'related.png');
   const chinesePngPath = path.join(project, '上汽电池护照状态机-流程图-1.png');
-  const dingtalkPngPath = path.join(project, 'dingtalk.png');
   const renderedPage = path.join(cacheDir, 'page-2.jpg');
   fs.writeFileSync(pdfPath, '%PDF-1.4 test fixture');
   fs.writeFileSync(officePath, 'office test fixture');
@@ -180,7 +179,6 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   fs.writeFileSync(outputFile, '# 最终报告\n');
   fs.writeFileSync(relatedPngPath, Buffer.from([1, 2, 3, 4]));
   fs.writeFileSync(chinesePngPath, Buffer.from([5, 6, 7, 8]));
-  fs.writeFileSync(dingtalkPngPath, Buffer.from([9, 9, 9, 9]));
   fs.writeFileSync(renderedPage, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
   const config = {
     host: '127.0.0.1', port: 0, dataDir, cacheDir, secret: 'server-secret',
@@ -207,19 +205,6 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   bridge.project = project;
   const dingtalk = {
     sentFiles: [],
-    listMessages: async ({ limit: _limit, before: _before } = {}) => ({
-      data: [
-        { id: 'msg-1', type: 'text', content: '测试消息', text: '测试消息', title: '测试消息', createdAt: '2026-08-09 10:00:00' },
-        { id: 'msg-media', type: 'file', content: '[文件] a.txt fileId: f1', text: 'a.txt', title: 'a.txt', fileId: 'f1', createdAt: '2026-08-09 09:00:00' },
-      ],
-      hasMore: false,
-      nextCursor: null,
-    }),
-    downloadMedia: async (id) => {
-      if (id !== 'msg-media') throw new Error('该消息没有可下载的媒体');
-      return { filePath: dingtalkPngPath, fileName: 'dingtalk.png' };
-    },
-    createTodo: async ({ title, due }) => ({ success: true, result: { taskId: 'todo-1', title, due } }),
     sendFileToSelf: async (filePath, fileName) => {
       dingtalk.sentFiles.push({ filePath, fileName });
       return { success: true, result: { messageId: 'send-1', fileName } };
@@ -283,11 +268,11 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   try {
-    const appScript = await fetch(`${base}/app.js?v=110`);
+    const appScript = await fetch(`${base}/app.js`);
     assert.equal(appScript.status, 200);
     assert.equal(appScript.headers.get('cache-control'), 'no-cache');
     const appShell = await fetch(`${base}/`);
-    assert.equal((await appShell.text()).includes('/app.js?v=110'), true);
+    assert.match(await appShell.text(), /\/app\.js\?v=\d+/);
     const denied = await fetch(`${base}/api/bootstrap`);
     assert.equal(denied.status, 401);
     const pairing = createPairingCode(config);
@@ -829,25 +814,14 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     const deniedDingtalk = await fetch(`${base}/api/dingtalk/messages`);
     assert.equal(deniedDingtalk.status, 401);
     const messages = await fetch(`${base}/api/dingtalk/messages`, { headers: { Cookie: cookie } });
-    assert.equal(messages.status, 200);
-    const messagesBody = await messages.json();
-    assert.equal(messagesBody.data[0].id, 'msg-1');
+    assert.equal(messages.status, 404);
     const media = await fetch(`${base}/api/dingtalk/media/msg-media/raw`, { headers: { Cookie: cookie } });
-    assert.equal(media.status, 200);
-    assert.deepEqual([...new Uint8Array(await media.arrayBuffer())], [9, 9, 9, 9]);
-    const mediaMissing = await fetch(`${base}/api/dingtalk/media/msg-missing/raw`, { headers: { Cookie: cookie } });
-    assert.equal(mediaMissing.status, 404);
+    assert.equal(media.status, 404);
     const todo = await fetch(`${base}/api/dingtalk/todos`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: '整理周报' }),
     });
-    assert.equal(todo.status, 200);
-    assert.equal((await todo.json()).result.taskId, 'todo-1');
-    const todoInvalid = await fetch(`${base}/api/dingtalk/todos`, {
-      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: '   ' }),
-    });
-    assert.equal(todoInvalid.status, 400);
+    assert.equal(todo.status, 404);
     const sent = await fetch(`${base}/api/artifacts/${pdfToken}/send-dingtalk`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}',
     });

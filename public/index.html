@@ -15,7 +15,7 @@
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=85">
+  <link rel="stylesheet" href="/styles.css?v=86">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -161,10 +161,6 @@
         <button id="mobileNewThreadButton" class="project-new-thread" type="button" aria-label="新建会话" title="新建会话">+</button>
       </section>
 
-      <section id="dingtalkView" class="view" data-view="dingtalk">
-        <div class="section-head"><div><p class="eyebrow">DINGTALK</p></div><button id="refreshDingtalkButton" class="text-button">刷新</button></div>
-        <div id="dingtalkMessageList" class="dingtalk-list"></div>
-      </section>
     </main>
 
     <div id="fileUploadPopover" class="file-upload-popover" data-anchor="nav" role="menu" hidden>
@@ -282,18 +278,6 @@
     </div>
   </dialog>
 
-  <dialog id="dingtalkTodoDialog" class="settings-dialog">
-    <header><strong>生成钉钉待办</strong><button id="closeDingtalkTodoButton" class="icon-button" aria-label="关闭">×</button></header>
-    <div class="settings-body">
-      <label><span>标题</span><input id="dingtalkTodoTitle" type="text" maxlength="500" autocomplete="off"></label>
-      <label><span>截止时间（可选）</span><input id="dingtalkTodoDue" type="datetime-local"></label>
-      <div class="thread-confirm-actions">
-        <button id="cancelDingtalkTodoButton" type="button">取消</button>
-        <button id="confirmDingtalkTodoButton" type="button" class="button primary">创建待办</button>
-      </div>
-    </div>
-  </dialog>
-
   <dialog id="projectCreateDialog" class="settings-dialog">
     <header><strong id="projectCreateTitle">新建文件</strong><button id="closeProjectCreateButton" class="icon-button" aria-label="关闭">×</button></header>
     <div class="settings-body project-entry-form">
@@ -339,6 +323,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=110"></script>
+  <script type="module" src="/app.js?v=112"></script>
 </body>
 </html>

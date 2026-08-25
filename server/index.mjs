@@ -42,6 +42,7 @@ const STATIC_FILES = new Map([
   ['/js/state.js', ['js/state.js', 'text/javascript; charset=utf-8']],
   ['/js/chat-core.js', ['js/chat-core.js', 'text/javascript; charset=utf-8']],
   ['/js/chat-view.js', ['js/chat-view.js', 'text/javascript; charset=utf-8']],
+  ['/js/turn-state.js', ['js/turn-state.js', 'text/javascript; charset=utf-8']],
   ['/js/mermaid-renderer.js', ['js/mermaid-renderer.js', 'text/javascript; charset=utf-8']],
   ['/js/keyboard.js', ['js/keyboard.js', 'text/javascript; charset=utf-8']],
   ['/js/loading.js', ['js/loading.js', 'text/javascript; charset=utf-8']],
@@ -461,7 +462,7 @@ export function createCodexMobileServer(options = {}) {
   const backendManager = options.backendManager ?? createCodexBackendManager(config);
   const bridge = options.bridge ?? new AppServerBridge(config);
   const tracker = options.tracker ?? new ArtifactTracker(config, hub);
-  const dingtalk = options.dingtalk ?? createDingTalk(config);
+  const dingtalk = options.dingtalk ?? createDingTalk();
   const favorites = options.favorites ?? createFavoritesStore(config);
   const skillMarket = options.skillMarket ?? createSkillMarket(config);
   const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
@@ -1472,42 +1473,6 @@ export function createCodexMobileServer(options = {}) {
           streamFile(request, response, pdf, { contentType: 'application/pdf', filename: `${path.parse(claims.path).name}.pdf` });
         } else {
           streamFile(request, response, claims.path, { download: url.searchParams.get('download') === '1' });
-        }
-        return;
-      }
-      if (request.method === 'GET' && pathname === '/api/dingtalk/messages') {
-        try {
-          const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 100);
-          const before = url.searchParams.get('before') || undefined;
-          json(response, 200, await dingtalk.listMessages({ limit, before }));
-        } catch (error) {
-          throw new AppError(error.message || '钉钉服务异常', 502, 'DINGTALK_ERROR');
-        }
-        return;
-      }
-      match = routeMatch(pathname, /^\/api\/dingtalk\/media\/([^/]+)\/(raw|download)$/);
-      if ((request.method === 'GET' || request.method === 'HEAD') && match) {
-        try {
-          const media = await dingtalk.downloadMedia(match[0]);
-          streamFile(request, response, media.filePath, {
-            contentType: mimeType(media.filePath),
-            download: match[1] === 'download',
-            filename: media.fileName,
-          });
-        } catch (error) {
-          throw new AppError(error.message || '钉钉媒体下载失败', 404, 'DINGTALK_MEDIA_NOT_FOUND');
-        }
-        return;
-      }
-      if (request.method === 'POST' && pathname === '/api/dingtalk/todos') {
-        const body = await readBody(request, config.maxBodyBytes);
-        const title = typeof body.title === 'string' ? body.title.trim() : '';
-        if (!title) throw new AppError('待办标题不能为空。', 400, 'TODO_TITLE_REQUIRED');
-        if (title.length > 500) throw new AppError('待办标题过长。', 400, 'TODO_TITLE_TOO_LONG');
-        try {
-          json(response, 200, await dingtalk.createTodo({ title, due: body.due || undefined }));
-        } catch (error) {
-          throw new AppError(error.message || '钉钉待办创建失败', 502, 'DINGTALK_TODO_ERROR');
         }
         return;
       }

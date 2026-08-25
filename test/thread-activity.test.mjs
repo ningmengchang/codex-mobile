@@ -28,6 +28,8 @@ test('thread activity tracks independent running, attention and completion state
   store.complete('thread-a', 'turn-a', 'completed', 210);
   assert.equal(store.get('thread-a').status, 'completed');
   assert.equal(store.get('thread-a').unreadCount, 1);
+  assert.equal(store.get('thread-a').lastCompletionTurnId, 'turn-a');
+  assert.equal(store.get('thread-a').lastCompletionPhase, 'plan');
   assert.equal(store.get('thread-b').status, 'running');
 
   store.complete('thread-b', 'turn-b', 'interrupted', 215);
@@ -51,6 +53,7 @@ test('thread activity survives reload and reconciles stale running snapshots', (
   assert.equal(restored.get('thread-running').status, 'running');
   assert.equal(restored.get('thread-done').status, 'failed');
   assert.equal(restored.get('thread-done').unreadCount, 1);
+  assert.equal(restored.get('thread-done').lastCompletionTurnId, 'turn-done');
 
   const stale = restored.reconcile({ id: 'thread-running', status: 'idle' }, 5000);
   assert.equal(stale.activity.status, 'idle');

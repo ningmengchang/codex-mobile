@@ -362,16 +362,6 @@ body.approval-open .composer { opacity: 0; pointer-events: none; }
 .thread-row-actions { display: flex; align-items: center; }
 .thread-section-label { margin: 9px 7px 3px; color: #697480; font: 9px ui-monospace, monospace; }
 .load-more-threads { display: block; margin: 10px auto 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--muted); font-size: 10px; cursor: pointer; }
-.dingtalk-list { display: grid; gap: 9px; max-width: 720px; margin: 0 auto; }
-.dingtalk-message { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
-.dingtalk-message-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font: 10px ui-monospace, monospace; }
-.dingtalk-type { color: var(--blue); text-transform: uppercase; }
-.dingtalk-message-body { color: var(--text); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
-.dingtalk-media-image { display: block; max-width: 100%; border-radius: 10px; }
-.dingtalk-download, .dingtalk-link { color: var(--blue); font-size: 12px; }
-.dingtalk-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.dingtalk-actions button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); color: var(--text); font-size: 11px; cursor: pointer; }
-.dingtalk-actions button:first-child { border-color: #48562f; background: #26331a; color: var(--accent); }
 .thread-star { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; border: 0; background: none; color: #66717e; font-size: 16px; cursor: pointer; }
 .thread-star.on { color: var(--warning); }
 .thread-more { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; border: 0; background: none; color: #66717e; font-size: 16px; cursor: pointer; }
@@ -707,7 +697,6 @@ html[data-theme="light"] #threadsView .thread-list.mobile .thread-item.active { 
 html[data-theme="light"] .file-upload-popover { background: #fffffff7; box-shadow: 0 10px 30px #24313d2b; }
 html[data-theme="light"] .file-upload-button,
 html[data-theme="light"] .file-upload-popover .file-upload-button,
-html[data-theme="light"] .dingtalk-actions button:first-child,
 html[data-theme="light"] .artifact-card button[data-action="share"],
 html[data-theme="light"] .project-file-share,
 html[data-theme="light"] .preview-share-button { border-color: #a9bd88; background: #edf5e3; }
@@ -779,7 +768,6 @@ html[data-theme="light"] .pair-form input {
 .thread-action-row,
 .thread-confirm-actions > button,
 .approval-actions button,
-.dingtalk-actions button,
 .artifact-card button,
 .skill-market-item button,
 .file-action-button,
@@ -1066,7 +1054,6 @@ html[data-theme="light"] #threadsView .thread-list.mobile .thread-item.active {
 .artifact-card,
 .project-button,
 .directory-entry,
-.dingtalk-message,
 .skill-item,
 .skill-market-item {
   border-color: var(--line);
@@ -1083,13 +1070,11 @@ html[data-theme="light"] .chip-icon { background: var(--blue-soft); color: var(-
 .preview-share-button,
 .file-upload-button,
 .file-upload-popover .file-upload-button,
-.dingtalk-actions button:first-child,
 html[data-theme="light"] .artifact-card button[data-action="share"],
 html[data-theme="light"] .project-file-share,
 html[data-theme="light"] .preview-share-button,
 html[data-theme="light"] .file-upload-button,
-html[data-theme="light"] .file-upload-popover .file-upload-button,
-html[data-theme="light"] .dingtalk-actions button:first-child {
+html[data-theme="light"] .file-upload-popover .file-upload-button {
   border-color: var(--accent-line);
   background: var(--accent-soft);
   color: var(--accent);

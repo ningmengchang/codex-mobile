@@ -20,12 +20,16 @@ const inProgressTurn = {
 const completedPlanTurn = {
   id: 'turn-1', status: 'completed', items: [
     { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: '我的问题' }] },
-    { id: 'plan-1', type: 'plan', text: '第一步：梳理需求。' },
-    {
-      id: 'structured-plan-turn-1', type: 'structuredPlan', explanation: '方案说明',
-      plan: [{ step: '调研', status: 'completed' }],
-    },
+    { id: 'agent-1', type: 'agentMessage', text: '第一步：梳理需求。第二步：形成实施方案。' },
   ],
+};
+const planningActivity = {
+  threadId: 'thread-1', status: 'planning', phase: 'plan', activeTurnId: 'turn-1',
+  unreadCount: 0, attentionCount: 0,
+};
+const completedPlanActivity = {
+  threadId: 'thread-1', status: 'completed', phase: null, activeTurnId: null,
+  unreadCount: 1, attentionCount: 0, lastCompletionTurnId: 'turn-1', lastCompletionPhase: 'plan',
 };
 const bootstrap = {
   appServer: { ready: true },
@@ -78,7 +82,8 @@ try {
     if (pathname === '/api/threads/thread-1' && route.request().method() === 'GET') {
       threadReadCount += 1;
       const turns = threadReadCount === 1 ? [inProgressTurn] : [completedPlanTurn];
-      return fulfillJson({ thread: { ...thread, turns } });
+      const activity = threadReadCount === 1 ? planningActivity : completedPlanActivity;
+      return fulfillJson({ thread: { ...thread, turns, activity } });
     }
     if (pathname === '/api/threads/thread-1/resume') {
       return fulfillJson({ thread: { ...thread, turns: [completedPlanTurn] } });
@@ -104,6 +109,10 @@ try {
       method: 'turn/started',
       params: { thread_id: 'thread-1', turn_id: 'turn-1', turn: { id: 'turn-1', status: 'inProgress', items: [] } },
     });
+    window.__sse.emit('thread-activity', {
+      threadId: 'thread-1', status: 'completed', phase: null, activeTurnId: null,
+      unreadCount: 1, attentionCount: 0, lastCompletionTurnId: 'turn-1', lastCompletionPhase: 'plan',
+    });
     window.__sse.emit('codex', {
       method: 'turn/completed',
       params: { thread_id: 'thread-1', turn_id: 'turn-1', turn: { id: 'turn-1', status: 'completed', items: [] } },
@@ -111,13 +120,13 @@ try {
   });
 
   await page.locator('#planDecisionBar:not([hidden])').waitFor({ timeout: 10_000 });
-  const planCards = await page.locator('article.plan-card, details.plan-card').count();
+  const finalAnswerVisible = await page.locator('.message > .agent-card').isVisible();
   const decisionVisible = await page.locator('#planDecisionBar').isVisible();
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-plan-restore.png', fullPage: true });
-  if (planCards < 1) throw new Error(`方案卡片未恢复：${planCards}`);
+  if (!finalAnswerVisible) throw new Error('普通最终方案回复未恢复');
   if (!decisionVisible) throw new Error('确认实施卡片未恢复');
   if (threadReadCount < 2) throw new Error(`回合完成后未重新读取会话：${threadReadCount}`);
-  process.stdout.write(`${JSON.stringify({ planCards, decisionVisible, threadReadCount })}\n`);
+  process.stdout.write(`${JSON.stringify({ finalAnswerVisible, decisionVisible, threadReadCount })}\n`);
 } finally {
   await browser.close();
 }

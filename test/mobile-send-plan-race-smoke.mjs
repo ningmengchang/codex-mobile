@@ -94,24 +94,14 @@ try {
   await page.locator('#mobileThreadList .thread-item').first().click();
   await page.waitForFunction(() => document.querySelector('#timeline')?.textContent?.includes('历史问题'), null, { timeout: 10_000 });
 
-  // 提交问题；POST /turns 延迟 500ms 返回空 items
+  // 真实规划回复可以只有普通 final_answer，不一定产生 plan / structuredPlan 工具事件。
+  await page.locator('#modeSwitch button[data-mode="plan"]').click();
   await page.locator('#promptInput').fill('请给我方案');
   await page.locator('#sendButton').click();
   await page.evaluate(() => {
     window.__sse.emit('codex', {
       method: 'turn/started',
       params: { thread_id: 'thread-1', turn_id: 'turn-9', turn: { id: 'turn-9', status: 'inProgress', items: [] } },
-    });
-    window.__sse.emit('codex', {
-      method: 'item/plan/delta',
-      params: { thread_id: 'thread-1', turn_id: 'turn-9', item_id: 'plan-1', delta: '第一步：梳理需求。' },
-    });
-    window.__sse.emit('codex', {
-      method: 'turn/plan/updated',
-      params: {
-        thread_id: 'thread-1', turn_id: 'turn-9', explanation: '方案说明',
-        plan: [{ step: '调研', status: 'completed' }],
-      },
     });
     window.__sse.emit('codex', {
       method: 'item/agentMessage/delta',
@@ -123,22 +113,18 @@ try {
     });
   });
 
-  await page.locator('details.plan-card').waitFor({ timeout: 10_000 });
+  await page.locator('#planDecisionBar:not([hidden])').waitFor({ timeout: 10_000 });
   await page.waitForTimeout(900); // 等 POST 返回并完成合并
 
-  const planVisible = await page.locator('details.plan-card').isVisible();
-  const structuredVisible = await page.locator('article.plan-card').first().isVisible();
   const decisionVisible = await page.locator('#planDecisionBar').isVisible();
   const agentText = await page.locator('.message > .agent-card').last().textContent();
   const timelineText = await page.locator('#timeline').textContent();
-  if (!planVisible) throw new Error('POST 返回后方案草案消失');
-  if (!structuredVisible) throw new Error('POST 返回后结构化方案消失');
-  if (!decisionVisible) throw new Error('方案已形成卡片未显示');
+  if (!decisionVisible) throw new Error('只有普通最终回复时，方案已形成卡片未显示');
   if (!agentText.includes('这是结论')) throw new Error(`结论丢失：${agentText}`);
   if (!timelineText.includes('历史问题')) throw new Error('历史回合被清空');
 
   await page.screenshot({ path: process.env.CODEX_MOBILE_SCREENSHOT ?? '/tmp/codex-mobile-send-plan-race.png', fullPage: true });
-  process.stdout.write(`${JSON.stringify({ planVisible, structuredVisible, decisionVisible, agentText, historyKept: timelineText.includes('历史问题') })}\n`);
+  process.stdout.write(`${JSON.stringify({ decisionVisible, agentText, historyKept: timelineText.includes('历史问题') })}\n`);
 } finally {
   await browser.close();
 }

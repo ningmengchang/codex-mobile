@@ -91,7 +91,6 @@ try {
       <article class="artifact-card"><strong>需求文档.md</strong><button>预览</button></article>
       <button class="project-button"><i>↯</i><span><strong>目录</strong><small>文件夹</small></span></button>
       <button class="directory-entry"><i>↯</i><span><strong>目录</strong><small>文件夹</small></span></button>
-      <article class="dingtalk-message"><div class="dingtalk-message-body">钉钉消息</div></article>
       <button class="skill-item"><strong>已安装技能</strong><small>技能简介</small></button>
       <article class="skill-market-item"><div class="skill-market-main"><strong>热门技能</strong><small>技能简介</small></div><button>安装</button></article>
       <section class="turn-artifacts"><strong>本次产出</strong></section>
@@ -109,7 +108,6 @@ try {
     'skillInstallDialog',
     'threadActionDialog',
     'threadRenameDialog',
-    'dingtalkTodoDialog',
     'projectCreateDialog',
     'projectDeleteDialog',
     'previewDialog',
@@ -172,7 +170,7 @@ try {
         },
         cards: Object.fromEntries([
           '.bubble', '.message > .agent-card', '.tool-card', '.turn-tools', '.plan-card', '.approval-card',
-          '.question-block', '.artifact-card', '.project-button', '.directory-entry', '.dingtalk-message',
+          '.question-block', '.artifact-card', '.project-button', '.directory-entry',
           '.skill-item', '.skill-market-item', '.turn-artifacts', '.file-share-status', '.toast',
         ].map((selector) => [selector, style(`#visualCoverageFixture ${selector}`)])),
         dialogs,
