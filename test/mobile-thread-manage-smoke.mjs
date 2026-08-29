@@ -37,6 +37,10 @@ try {
       close() {}
     };
     window.__boot = boot;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text) => { window.__copiedText = text; } },
+    });
   }, bootstrap);
   const page = await context.newPage();
   let deleted = false;
@@ -75,6 +79,16 @@ try {
       return fulfillJson({ deleted: true, result: { deleted: true } });
     }
     if (pathname === '/api/threads/t-a/artifacts') return fulfillJson({ data: [] });
+    if (pathname === '/api/threads/t-a/handoff') return fulfillJson({
+      format: 'codex-mobile-handoff/v1',
+      content: '# Codex Mobile 交接包\n\n问题A\n\n会话A内容',
+      bytes: 55,
+      turnCount: 1,
+      truncated: false,
+      sourceAgent: 'gpt',
+      sourceAgentLabel: 'GPT',
+      sourceStatus: 'idle',
+    });
     if (pathname === '/api/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' });
     const file = path.join(publicRoot, pathname === '/' ? 'index.html' : pathname);
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404, body: 'not found' });
@@ -96,10 +110,23 @@ try {
   await page.locator('#chatThreadMoreButton').click();
   await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
   if (await page.locator('#threadArtifactsAction').isHidden()) throw new Error('聊天右上角菜单缺少产出物入口');
+  if (await page.locator('#threadHandoffAction').isHidden()) throw new Error('聊天右上角菜单缺少交接包入口');
   if (await page.locator('#threadArtifactsAction').textContent() !== '查看文档') throw new Error('聊天右上角文档入口文案错误');
   if (!await page.locator('#threadRenameAction').isHidden() || !await page.locator('#threadDeleteAction').isHidden()) {
     throw new Error('聊天右上角菜单不应显示重命名或删除会话');
   }
+  await page.locator('#threadHandoffAction').click();
+  await page.locator('#handoffDialog[open]').waitFor({ timeout: 5_000 });
+  await page.locator('#handoffContent:not([disabled])').waitFor({ timeout: 5_000 });
+  if (!await page.locator('#handoffContent').inputValue().then((value) => value.includes('问题A'))) {
+    throw new Error('交接包没有加载当前会话内容');
+  }
+  await page.locator('#handoffContent').fill('# 已编辑交接包\n\n补充说明');
+  await page.locator('#copyHandoffButton').click();
+  await page.waitForFunction(() => window.__copiedText === '# 已编辑交接包\n\n补充说明', null, { timeout: 5_000 });
+  await page.locator('#closeHandoffButton').click();
+  await page.locator('#chatThreadMoreButton').click();
+  await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
   await page.locator('#threadArtifactsAction').click();
   await page.locator('#artifactsView.active').waitFor({ timeout: 5_000 });
   if (!await page.evaluate(() => location.hash === '#artifacts/t-a' && document.body.classList.contains('mobile-artifacts-detail'))) {
@@ -116,6 +143,7 @@ try {
   await page.locator('#mobileThreadList .thread-more').click();
   await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });
   if (!await page.locator('#threadArtifactsAction').isHidden()) throw new Error('会话列表三点菜单不应显示产出物入口');
+  if (!await page.locator('#threadHandoffAction').isHidden()) throw new Error('会话列表三点菜单不应显示交接包入口');
   if (await page.locator('#threadRenameAction').isHidden() || await page.locator('#threadDeleteAction').isHidden()) {
     throw new Error('会话列表三点菜单应保留重命名和删除会话');
   }

@@ -15,7 +15,7 @@
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=86">
+  <link rel="stylesheet" href="/styles.css?v=87">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -236,6 +236,7 @@
     <header><strong>会话操作</strong><button id="closeThreadActionButton" class="icon-button" aria-label="关闭">×</button></header>
     <div class="settings-body">
       <button id="threadArtifactsAction" type="button" class="thread-action-row" hidden>查看文档</button>
+      <button id="threadHandoffAction" type="button" class="thread-action-row" hidden>复制交接包</button>
       <button id="threadCopyAction" type="button" class="thread-action-row">复制到其他目录</button>
       <button id="threadRenameAction" type="button" class="thread-action-row">重命名</button>
       <button id="threadDeleteAction" type="button" class="thread-action-row danger">删除会话</button>
@@ -245,6 +246,19 @@
           <button id="threadDeleteCancel" type="button">取消</button>
           <button id="threadDeleteOk" type="button" class="button danger">确认删除</button>
         </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="handoffDialog" class="settings-dialog handoff-dialog">
+    <header><strong>交接包</strong><button id="closeHandoffButton" class="icon-button" aria-label="关闭">×</button></header>
+    <div class="settings-body handoff-body">
+      <p id="handoffMeta" class="handoff-meta">正在读取本地会话…</p>
+      <p id="handoffWarning" class="handoff-warning" hidden></p>
+      <textarea id="handoffContent" class="handoff-content" aria-label="交接包内容" spellcheck="false" disabled></textarea>
+      <div class="thread-confirm-actions handoff-actions">
+        <button id="cancelHandoffButton" type="button">关闭</button>
+        <button id="copyHandoffButton" type="button" class="button primary" disabled>复制</button>
       </div>
     </div>
   </dialog>
@@ -323,6 +337,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=112"></script>
+  <script type="module" src="/app.js?v=113"></script>
 </body>
 </html>

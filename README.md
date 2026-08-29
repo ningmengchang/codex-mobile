@@ -21,6 +21,14 @@
 - 完成和失败状态以未读方式持久化到服务数据目录，打开对应会话并加载完成后才会清除；刷新和 SSE 重连不会丢失。
 - 聊天详情继续使用最新 20 回合优先和向上分页加载，桌面端保留左侧会话栏与右侧聊天的双栏结构。
 
+## GPT / DeepSeek 手动交接
+
+- GPT 与 DeepSeek 继续使用各自原生的 `CODEX_HOME` 和会话，不做后台同步，也不修改任何 Codex 登录或模型配置。
+- 在具体聊天右上角菜单选择“复制交接包”，服务会从本地可见历史、方案、文档索引与 Git 状态生成标准 Markdown；该过程不调用模型，在账号没有额度时也能使用。
+- 交接包会自动隐藏常见 API Key、令牌、密码与配对码，并限制为默认 64 KiB、最近 20 个回合；复制前可以在弹窗中检查和编辑。
+- 复制后由用户手动切换 Agent，打开或新建目标会话并粘贴发送；需要反向接力时重复同一流程。
+- 手机端与 CLI 只有在连接同一台机器、使用同一 Agent 的 `CODEX_HOME`、恢复同一个原生会话 ID 时才会看到相同历史；同一会话同时只允许一个 writer。
+
 ## 能力
 
 - 新建、查看和恢复 Codex 会话，实时显示回复、计划、工具调用、命令输出和 diff。
@@ -38,11 +46,11 @@
 ```text
 手机 PWA ── SSH 隧道 ──> 127.0.0.1:3765
                               │
-                         Node.js 网关 (root)
+                         Node.js 网关 (ningmengchang)
                               │ JSONL / stdio
                          Codex App Server
                               │
-                         /root/.codex
+                         /home/ningmengchang/.codex
 ```
 
 网关不向浏览器开放任意 Shell、文件写入或删除接口。浏览器只能创建/恢复会话、发送回合、追加/停止和处理 Codex 发起的审批。
@@ -56,7 +64,7 @@
 
 ## 安装
 
-要求：Node.js 18+、Codex CLI、`/root/.codex/auth.json`；Office 版式预览需 LibreOffice 和 Poppler，Excel 表格预览需 Python 3 与 openpyxl。
+要求：Node.js 18+、Codex CLI、`/home/ningmengchang/.codex/auth.json`；Office 版式预览需 LibreOffice 和 Poppler，Excel 表格预览需 Python 3 与 openpyxl。
 
 ```bash
 cd /home/ningmengchang/ideaProjects/codex-mobile
@@ -64,7 +72,7 @@ npm run verify
 sudo ./scripts/install-system.sh
 ```
 
-安装脚本会把经过测试的网关代码和当前 Codex 可执行文件部署到 root-owned 的 `/opt/codex-mobile`。systemd 不会执行普通用户可以事后替换的源码或 Codex 启动器。服务启动后会输出一次性 8 位配对码。以后可随时重新生成：
+安装脚本会把经过测试的网关代码和当前 Codex 可执行文件部署到 `/opt/codex-mobile`，并由 systemd 以 `ningmengchang` 用户运行。服务启动后会输出一次性 8 位配对码。以后可随时重新生成：
 
 ```bash
 sudo /usr/bin/node /opt/codex-mobile/scripts/pair.mjs
@@ -117,6 +125,8 @@ CODEX_MOBILE_MAX_FILE_BYTES=536870912
 CODEX_MOBILE_LOG_LEVEL=info
 CODEX_MOBILE_DEFAULT_MODEL=gpt-5.6-sol
 CODEX_MOBILE_DEFAULT_EFFORT=max
+CODEX_MOBILE_HANDOFF_MAX_BYTES=65536
+CODEX_MOBILE_HANDOFF_RECENT_TURNS=20
 ```
 
 多个允许根目录使用 Linux 路径分隔符 `:`。服务默认不接受外网连接，不要把监听地址改成 `0.0.0.0`。

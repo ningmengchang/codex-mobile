@@ -34,6 +34,7 @@ class FakeBridge extends EventEmitter {
     this.activeWriterThreads = new Set();
     this.dynamicThreads = new Map();
     this.forkCount = 0;
+    this.threadTurns = null;
   }
   status() { return { ready: true, pid: 123, pendingRequests: 0 }; }
   getServerRequests() {
@@ -88,6 +89,10 @@ class FakeBridge extends EventEmitter {
     } };
     if (method === 'thread/turns/list') {
       this.lastTurnsListParams = params;
+      if (this.threadTurns) {
+        const ordered = params.sortDirection === 'desc' ? [...this.threadTurns].reverse() : [...this.threadTurns];
+        return { data: ordered.slice(0, params.pageSize), nextCursor: null };
+      }
       return { data: [{ id: 'turn-9', status: 'completed', items: [] }], nextCursor: 'cursor-next' };
     }
     if (method === 'thread/name/set') {
@@ -186,6 +191,7 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     artifactTtlSeconds: 60, maxFileBytes: 1024 * 1024, maxBodyBytes: 64 * 1024,
     ownershipHelper: '/bin/true', logLevel: 'silent',
     defaultModel: 'pinned-model', defaultEffort: 'max',
+    handoffMaxBytes: 64 * 1024, handoffRecentTurns: 20,
     skillsRoots: [skillsRoot],
     codexBackends: [
       {
@@ -263,6 +269,9 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
       assert.equal(index, 0);
       return { index: 0, name: 'Sheet1', rows: 2, columns: 2, renderedRows: 2, renderedColumns: 2 };
     },
+    readGitSnapshot: async (cwd) => ({
+      available: true, branch: 'master', head: 'abc123', subject: '测试提交', status: `## master\n M ${path.relative(cwd, markdownPath)}`,
+    }),
   });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   const port = app.server.address().port;
@@ -305,6 +314,27 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(catalogPayload.models[0].id, 'test-model');
     assert.deepEqual(catalogPayload.collaborationModes.map((mode) => mode.mode), ['plan', 'default']);
     assert.equal(catalogPayload.defaultModel, 'pinned-model');
+    bridge.threadTurns = [
+      { id: 'handoff-turn-1', status: 'completed', items: [
+        { id: 'handoff-user-1', type: 'userMessage', content: [{ type: 'text', text: '实现手动交接包' }] },
+        { id: 'handoff-agent-1', type: 'agentMessage', text: '已经完成后端读取。' },
+      ] },
+      { id: 'handoff-turn-2', status: 'completed', items: [
+        { id: 'handoff-plan-1', type: 'plan', text: '下一步补齐前端复制入口。' },
+      ] },
+    ];
+    const startsBeforeHandoff = bridge.calls.filter((call) => call.method === 'turn/start').length;
+    const handoff = await fetch(`${base}/api/threads/thread-1/handoff`, { headers: { Cookie: cookie } });
+    assert.equal(handoff.status, 200);
+    const handoffPayload = await handoff.json();
+    assert.equal(handoffPayload.format, 'codex-mobile-handoff/v1');
+    assert.equal(handoffPayload.sourceAgent, 'gpt');
+    assert.equal(handoffPayload.sourceAgentLabel, 'GPT');
+    assert.match(handoffPayload.content, /实现手动交接包/);
+    assert.match(handoffPayload.content, /下一步补齐前端复制入口/);
+    assert.match(handoffPayload.content, /分支：master/);
+    assert.equal(bridge.calls.filter((call) => call.method === 'turn/start').length, startsBeforeHandoff);
+    bridge.threadTurns = null;
     const originalArtifactList = app.tracker.list.bind(app.tracker);
     app.tracker.list = (threadId) => threadId === 'artifact-page-thread'
       ? Array.from({ length: 235 }, (_, index) => ({

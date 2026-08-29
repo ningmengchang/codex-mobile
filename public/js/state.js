@@ -65,6 +65,7 @@ export const state = {
   currentArtifact: null,
   threadAction: null,
   threadCopy: null,
+  handoff: null,
   accountStatus: null,
   accountStatusLoading: false,
   events: null,

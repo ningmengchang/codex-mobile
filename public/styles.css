@@ -369,6 +369,12 @@ body.approval-open .composer { opacity: 0; pointer-events: none; }
 .thread-action-row.danger { color: var(--danger); border-color: #593b3b; }
 .thread-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread-confirm-actions .button.danger { border-color: var(--danger); background: #3a1c1c; color: #ffb1aa; }
+.handoff-dialog { width: min(720px, 100%); height: min(78dvh, 760px); }
+.handoff-body { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; height: calc(100% - 42px); min-height: 0; }
+.handoff-meta { margin: 0; color: var(--subtle); font: 10px/1.4 var(--font-ui); }
+.handoff-warning { margin: 0; padding: 7px 9px; border: 1px solid var(--warning-line, #715b2a); border-radius: 8px; background: var(--warning-soft, #332a15); color: var(--warning, #f0ca72); font-size: 11px; }
+.handoff-content { width: 100%; min-height: 0; padding: 10px; resize: none; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--font-mono); }
+.handoff-actions { margin-top: 0; }
 .thread-copy-dialog { max-height: min(82dvh, 680px); }
 .thread-copy-body { min-height: 0; grid-template-rows: auto auto auto minmax(100px, 1fr) auto auto; overflow: hidden; }
 .thread-copy-source, .thread-copy-status { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
@@ -522,6 +528,8 @@ body.approval-open .composer { opacity: 0; pointer-events: none; }
 @keyframes rise { from { opacity: 0; transform: translateY(7px); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 780px) {
+  .handoff-dialog { height: min(82dvh, 720px); }
+  .handoff-content { font-size: 10px; }
   .app-shell { grid-template-rows: minmax(0, 1fr); }
   .workspace { display: block; min-height: 0; overflow: hidden; }
   .session-rail { display: none; }

@@ -14,6 +14,7 @@ import { createDingTalk } from './dingtalk.mjs';
 import { EventHub } from './events.mjs';
 import { createFavoritesStore } from './favorites.mjs';
 import { classifyFile, fileMetadata, isDocumentPath, mimeType } from './files.mjs';
+import { buildHandoffPackage, readGitSnapshot } from './handoff-package.mjs';
 import { listSkills } from './skills.mjs';
 import { createSkillMarket } from './skill-market.mjs';
 import { createRolloutHistory, isRolloutCursor } from './rollout-history.mjs';
@@ -362,6 +363,44 @@ async function listThreads(bridge, config, options = {}) {
   };
 }
 
+function uniqueTurns(turns) {
+  const seen = new Set();
+  return (Array.isArray(turns) ? turns : []).filter((turn) => {
+    const id = String(turn?.id ?? '');
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function hasHandoffItems(turns) {
+  const allowed = new Set(['usermessage', 'agentmessage', 'plan', 'structuredplan']);
+  return turns.some((turn) => (turn?.items ?? []).some((item) => allowed.has(String(item?.type ?? '').toLowerCase())));
+}
+
+async function handoffTurns(bridge, rolloutHistory, thread, recentTurns) {
+  try {
+    const [oldest, latest] = await Promise.all([
+      bridge.request('thread/turns/list', {
+        threadId: thread.id,
+        pageSize: 1,
+        sortDirection: 'asc',
+        itemsView: 'full',
+      }),
+      bridge.request('thread/turns/list', {
+        threadId: thread.id,
+        pageSize: Math.min(Math.max(recentTurns, 1), 50),
+        sortDirection: 'desc',
+        itemsView: 'full',
+      }),
+    ]);
+    const latestChronological = [...(latest?.data ?? [])].reverse();
+    const nativeTurns = uniqueTurns([...(oldest?.data ?? []), ...latestChronological]);
+    if (nativeTurns.length && hasHandoffItems(nativeTurns)) return nativeTurns;
+  } catch {}
+  return rolloutHistory.readTurns(thread);
+}
+
 function userInput(body, cwd, config) {
   if (typeof body.text !== 'string' || !body.text.trim()) {
     throw new AppError('请输入要交给 Codex 的内容。', 400, 'TEXT_REQUIRED');
@@ -481,6 +520,9 @@ export function createCodexMobileServer(options = {}) {
   const spreadsheetTools = {
     readWorkbook: options.readWorkbook ?? readWorkbook,
     readWorksheet: options.readWorksheet ?? readWorksheet,
+  };
+  const handoffTools = {
+    readGitSnapshot: options.readGitSnapshot ?? readGitSnapshot,
   };
   const pairingAttempts = [];
   const catalogs = {
@@ -1163,6 +1205,39 @@ export function createCodexMobileServer(options = {}) {
         tracker.registerThread(result.thread.id, cwd);
         rememberThread(result.thread, cwd);
         json(response, 200, { ...result, readOnly: true, thread: threadActivity.attach(result.thread) });
+        return;
+      }
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/handoff$/);
+      if (request.method === 'GET' && match) {
+        const result = await bridge.request('thread/read', { threadId: match[0], includeTurns: false });
+        if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
+        const cwd = result.cwd ?? result.thread.cwd;
+        rememberThread(result.thread, cwd);
+        const meta = threadMeta.get(result.thread.id) ?? result.thread;
+        const turns = await handoffTurns(bridge, rolloutHistory, { ...result.thread, ...meta, cwd }, config.handoffRecentTurns);
+        const recovered = meta?.path
+          ? conversationArtifacts.snapshot?.({ id: result.thread.id, ...meta, cwd })?.items ?? []
+          : [];
+        const artifacts = [...tracker.list(result.thread.id), ...recovered]
+          .sort((left, right) => {
+            const leftTime = Date.parse(left.modifiedAt ?? left.capturedAt ?? '') || 0;
+            const rightTime = Date.parse(right.modifiedAt ?? right.capturedAt ?? '') || 0;
+            return rightTime - leftTime;
+          });
+        const backendId = backendManager.activeId();
+        const backend = backendManager.get(backendId);
+        const payload = buildHandoffPackage({
+          thread: { ...result.thread, ...meta, cwd },
+          turns,
+          artifacts,
+          activity: threadActivity.get(result.thread.id),
+          sourceAgent: backend?.label ?? backendId,
+          sourceAgentId: backendId,
+          gitSnapshot: await handoffTools.readGitSnapshot(cwd),
+          maxBytes: config.handoffMaxBytes,
+          recentTurnLimit: config.handoffRecentTurns,
+        });
+        json(response, 200, payload);
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns$/);

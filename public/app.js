@@ -59,7 +59,7 @@ async function copyText(text) {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
-      return;
+      return true;
     }
   } catch {}
   const textarea = document.createElement('textarea');
@@ -67,8 +67,14 @@ async function copyText(text) {
   textarea.style.position = 'fixed';
   textarea.style.opacity = '0';
   document.body.append(textarea);
+  textarea.focus();
   textarea.select();
-  try { document.execCommand('copy'); } finally { textarea.remove(); }
+  try {
+    if (!document.execCommand('copy')) throw new Error('浏览器拒绝复制');
+    return true;
+  } finally {
+    textarea.remove();
+  }
 }
 
 function showLogin() {
@@ -1356,6 +1362,7 @@ function openThreadActionDialog(thread, source = 'list') {
   state.threadAction = thread;
   const fromChat = source === 'chat';
   $('#threadArtifactsAction').hidden = !fromChat;
+  $('#threadHandoffAction').hidden = !fromChat;
   $('#threadCopyAction').hidden = fromChat;
   $('#threadRenameAction').hidden = fromChat;
   $('#threadDeleteAction').hidden = fromChat;
@@ -1367,8 +1374,75 @@ function openThreadActionDialog(thread, source = 'list') {
 function closeThreadActionDialog() {
   $('#threadActionDialog').close();
   $('#threadArtifactsAction').hidden = true;
+  $('#threadHandoffAction').hidden = true;
   $('#threadCopyAction').hidden = false;
   state.threadAction = null;
+}
+
+function closeHandoffDialog() {
+  $('#handoffDialog').close();
+  $('#handoffContent').value = '';
+  $('#handoffContent').disabled = true;
+  $('#copyHandoffButton').disabled = true;
+  $('#handoffWarning').hidden = true;
+  state.handoff = null;
+}
+
+async function openThreadHandoffAction() {
+  const thread = state.threadAction;
+  if (!thread || thread.id !== state.currentThread?.id) {
+    closeThreadActionDialog();
+    toast('请先打开对应会话');
+    return;
+  }
+  $('#threadActionDialog').close();
+  $('#threadArtifactsAction').hidden = true;
+  $('#threadHandoffAction').hidden = true;
+  state.threadAction = null;
+  state.handoff = { threadId: thread.id, loading: true };
+  $('#handoffMeta').textContent = '正在读取本地会话…';
+  $('#handoffWarning').hidden = true;
+  $('#handoffContent').value = '';
+  $('#handoffContent').disabled = true;
+  $('#copyHandoffButton').disabled = true;
+  $('#handoffDialog').showModal();
+  try {
+    const payload = await api(`/api/threads/${encodeURIComponent(thread.id)}/handoff`);
+    if (state.handoff?.threadId !== thread.id) return;
+    state.handoff = { threadId: thread.id, loading: false, payload };
+    $('#handoffContent').value = payload.content ?? '';
+    $('#handoffContent').disabled = false;
+    $('#copyHandoffButton').disabled = !payload.content;
+    $('#handoffMeta').textContent = [
+      payload.sourceAgentLabel ?? payload.sourceAgent,
+      formatBytes(payload.bytes ?? 0),
+      `${payload.turnCount ?? 0} 个已读取回合`,
+      payload.truncated ? '已自动精简' : '',
+    ].filter(Boolean).join(' · ');
+    const active = ['running', 'planning', 'waiting', 'active', 'inprogress', 'in_progress']
+      .includes(String(payload.sourceStatus ?? '').toLowerCase());
+    $('#handoffWarning').hidden = !active;
+    $('#handoffWarning').textContent = active ? '来源任务仍在进行，交接包只包含当前已经保存的内容。' : '';
+  } catch (error) {
+    if (state.handoff?.threadId !== thread.id) return;
+    $('#handoffMeta').textContent = '交接包生成失败';
+    $('#handoffWarning').hidden = false;
+    $('#handoffWarning').textContent = error.message;
+    toast(error.message, 'error');
+  }
+}
+
+async function copyHandoffPackage() {
+  const textarea = $('#handoffContent');
+  if (!textarea.value) return;
+  try {
+    await copyText(textarea.value);
+    toast('交接包已复制，可切换 Agent 后粘贴发送');
+  } catch {
+    textarea.focus();
+    textarea.select();
+    toast('自动复制失败，内容已全选，请长按复制', 'error');
+  }
 }
 
 function openThreadArtifactsAction() {
@@ -3354,8 +3428,12 @@ $('#promptInput').addEventListener('input', () => {
 $('#timeline').addEventListener('click', async (event) => {
   const button = event.target.closest('.copy-question');
   if (!button) return;
-  await copyText(button.dataset.copyText ?? '');
-  toast('问题已复制');
+  try {
+    await copyText(button.dataset.copyText ?? '');
+    toast('问题已复制');
+  } catch {
+    toast('复制失败，请长按问题文字复制', 'error');
+  }
 });
 $('#jumpQuestionButton').addEventListener('click', jumpToLatestQuestion);
 $('#settingsButton').addEventListener('click', () => {
@@ -3373,6 +3451,11 @@ $('#chatThreadMoreButton').addEventListener('click', () => {
   if (state.currentThread) openThreadActionDialog(state.currentThread, 'chat');
 });
 $('#threadArtifactsAction').addEventListener('click', openThreadArtifactsAction);
+$('#threadHandoffAction').addEventListener('click', openThreadHandoffAction);
+$('#closeHandoffButton').addEventListener('click', closeHandoffDialog);
+$('#cancelHandoffButton').addEventListener('click', closeHandoffDialog);
+$('#copyHandoffButton').addEventListener('click', copyHandoffPackage);
+$('#handoffDialog').addEventListener('cancel', () => { state.handoff = null; });
 $('#threadCopyAction').addEventListener('click', openThreadCopyDialog);
 $('#threadRenameAction').addEventListener('click', openThreadRenameDialog);
 $('#threadDeleteAction').addEventListener('click', confirmThreadDelete);
