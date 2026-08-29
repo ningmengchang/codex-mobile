@@ -3,9 +3,10 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const FORMAT = 'codex-mobile-handoff/v1';
-const DEFAULT_MAX_BYTES = 64 * 1024;
-const DEFAULT_RECENT_TURNS = 20;
-const MAX_ITEM_BYTES = 12 * 1024;
+const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
+const DEFAULT_RECENT_TURNS = 500;
+const MIN_ITEM_BYTES = 12 * 1024;
+const MAX_ITEM_BYTES = 256 * 1024;
 
 function byteLength(value) {
   return Buffer.byteLength(String(value ?? ''), 'utf8');
@@ -34,7 +35,7 @@ export function redactHandoffSecrets(value) {
     .replace(/((?:配对码|pair(?:ing)?\s*code)\s*[=:：]?\s*)\d{6,12}/gi, '$1[已隐藏]');
 }
 
-function cleanText(value, maxBytes = MAX_ITEM_BYTES) {
+function cleanText(value, maxBytes = MIN_ITEM_BYTES) {
   const text = redactHandoffSecrets(String(value ?? ''))
     .replace(/\r\n?/g, '\n')
     .replace(/\n{4,}/g, '\n\n\n')
@@ -66,20 +67,22 @@ function structuredPlanText(item) {
   }).filter(Boolean).join('\n');
 }
 
-function normalizedItem(item) {
+function normalizedItem(item, maxItemBytes) {
   const type = String(item?.type ?? '').toLowerCase();
-  if (type === 'usermessage') return { role: 'user', text: cleanText(contentText(item.content) || item.text) };
-  if (type === 'agentmessage') return { role: 'agent', text: cleanText(item.text || contentText(item.content)) };
-  if (type === 'plan' || type === 'structuredplan') return { role: 'plan', text: cleanText(structuredPlanText(item)) };
+  if (type === 'usermessage') return { role: 'user', text: cleanText(contentText(item.content) || item.text, maxItemBytes) };
+  if (type === 'agentmessage') return { role: 'agent', text: cleanText(item.text || contentText(item.content), maxItemBytes) };
+  if (type === 'plan' || type === 'structuredplan') return { role: 'plan', text: cleanText(structuredPlanText(item), maxItemBytes) };
   return null;
 }
 
-function normalizedTurns(turns) {
+function normalizedTurns(turns, maxItemBytes) {
   return (Array.isArray(turns) ? turns : []).map((turn) => ({
     id: String(turn?.id ?? ''),
     status: typeof turn?.status === 'string' ? turn.status : turn?.status?.type ?? '',
     startedAt: turn?.startedAt ?? null,
-    items: (Array.isArray(turn?.items) ? turn.items : []).map(normalizedItem).filter((item) => item?.text),
+    items: (Array.isArray(turn?.items) ? turn.items : [])
+      .map((item) => normalizedItem(item, maxItemBytes))
+      .filter((item) => item?.text),
   })).filter((turn) => turn.items.length);
 }
 
@@ -187,12 +190,13 @@ export async function readGitSnapshot(cwd, options = {}) {
 
 export function buildHandoffPackage(options) {
   const thread = options.thread ?? {};
-  const turns = normalizedTurns(options.turns);
   const sourceAgent = inline(options.sourceAgent || options.sourceAgentId || 'Codex');
   const sourceAgentId = inline(options.sourceAgentId || 'unknown');
   const maxBytes = Math.max(16 * 1024, Number(options.maxBytes) || DEFAULT_MAX_BYTES);
   const recentTurnLimit = Math.max(1, Number(options.recentTurnLimit) || DEFAULT_RECENT_TURNS);
-  const sectionMaxBytes = Math.max(1536, Math.min(8 * 1024, Math.floor(maxBytes / 8)));
+  const maxItemBytes = Math.max(MIN_ITEM_BYTES, Math.min(MAX_ITEM_BYTES, Math.floor(maxBytes / 20)));
+  const turns = normalizedTurns(options.turns, maxItemBytes);
+  const sectionMaxBytes = Math.max(1536, Math.min(256 * 1024, Math.floor(maxBytes / 8)));
   const generatedAt = options.generatedAt instanceof Date ? options.generatedAt : new Date(options.generatedAt ?? Date.now());
   const status = inline(options.activity?.status ?? thread?.status?.type ?? thread?.status ?? 'idle');
   const firstUser = firstItem(turns, 'user');
@@ -256,6 +260,7 @@ ${artifactSection(options.artifacts, sectionMaxBytes)}
     format: FORMAT,
     content,
     bytes: byteLength(content),
+    maxBytes,
     characters: content.length,
     truncated: content !== full || turns.length > recentTurnLimit,
     sourceAgent: sourceAgentId,

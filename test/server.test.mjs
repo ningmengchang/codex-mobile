@@ -91,7 +91,14 @@ class FakeBridge extends EventEmitter {
       this.lastTurnsListParams = params;
       if (this.threadTurns) {
         const ordered = params.sortDirection === 'desc' ? [...this.threadTurns].reverse() : [...this.threadTurns];
-        return { data: ordered.slice(0, params.pageSize), nextCursor: null };
+        const cursorMatch = String(params.cursor ?? '').match(/^turn-cursor:(\d+)$/);
+        const offset = cursorMatch ? Number.parseInt(cursorMatch[1], 10) : 0;
+        const data = ordered.slice(offset, offset + params.pageSize);
+        const nextOffset = offset + data.length;
+        return {
+          data,
+          nextCursor: nextOffset < ordered.length ? `turn-cursor:${nextOffset}` : null,
+        };
       }
       return { data: [{ id: 'turn-9', status: 'completed', items: [] }], nextCursor: 'cursor-next' };
     }
@@ -330,10 +337,39 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(handoffPayload.format, 'codex-mobile-handoff/v1');
     assert.equal(handoffPayload.sourceAgent, 'gpt');
     assert.equal(handoffPayload.sourceAgentLabel, 'GPT');
-    assert.match(handoffPayload.content, /实现手动交接包/);
-    assert.match(handoffPayload.content, /下一步补齐前端复制入口/);
-    assert.match(handoffPayload.content, /分支：master/);
+    assert.equal(handoffPayload.storage, 'file');
+    assert.match(handoffPayload.content, /请读取本机交接包文件/);
+    assert.equal(handoffPayload.content, handoffPayload.instruction);
+    assert.equal(path.dirname(handoffPayload.filePath), path.join(dataDir, 'handoffs'));
+    const storedHandoff = fs.readFileSync(handoffPayload.filePath, 'utf8');
+    assert.match(storedHandoff, /实现手动交接包/);
+    assert.match(storedHandoff, /下一步补齐前端复制入口/);
+    assert.match(storedHandoff, /分支：master/);
+    assert.equal(fs.statSync(handoffPayload.filePath).mode & 0o777, 0o600);
+    assert.equal(handoffPayload.fileBytes, Buffer.byteLength(storedHandoff, 'utf8'));
+    assert.equal(handoffPayload.bytes, handoffPayload.fileBytes);
     assert.equal(bridge.calls.filter((call) => call.method === 'turn/start').length, startsBeforeHandoff);
+
+    bridge.threadTurns = Array.from({ length: 65 }, (_, index) => ({
+      id: `paged-handoff-${index + 1}`,
+      status: 'completed',
+      items: [{
+        id: `paged-user-${index + 1}`,
+        type: 'userMessage',
+        content: [{ type: 'text', text: `分页交接问题-${index + 1}` }],
+      }],
+    }));
+    config.handoffRecentTurns = 60;
+    const pagedHandoff = await fetch(`${base}/api/threads/thread-1/handoff`, { headers: { Cookie: cookie } });
+    assert.equal(pagedHandoff.status, 200);
+    const pagedHandoffPayload = await pagedHandoff.json();
+    const pagedHandoffContent = fs.readFileSync(pagedHandoffPayload.filePath, 'utf8');
+    assert.match(pagedHandoffContent, /分页交接问题-1/);
+    assert.match(pagedHandoffContent, /分页交接问题-6/);
+    assert.match(pagedHandoffContent, /分页交接问题-65/);
+    assert.doesNotMatch(pagedHandoffContent, /分页交接问题-5(?:\D|$)/);
+    assert(bridge.calls.some((call) => call.method === 'thread/turns/list' && call.params.cursor === 'turn-cursor:50'));
+    config.handoffRecentTurns = 20;
     bridge.threadTurns = null;
     const originalArtifactList = app.tracker.list.bind(app.tracker);
     app.tracker.list = (threadId) => threadId === 'artifact-page-thread'

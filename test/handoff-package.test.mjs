@@ -62,6 +62,28 @@ test('handoff package stays bounded and preserves latest visible turns', () => {
   assert.match(payload.content, /给接力 Agent 的要求/);
 });
 
+test('file handoff packages can grow beyond the legacy 64 KB ceiling up to 5 MB', () => {
+  const turns = Array.from({ length: 80 }, (_, index) => turn(
+    `large-turn-${index + 1}`,
+    `大交接问题-${index + 1}-${'甲'.repeat(4000)}`,
+    `大交接回答-${index + 1}-${'乙'.repeat(4000)}`,
+  ));
+  const payload = buildHandoffPackage({
+    thread: { id: 'five-megabyte-thread', name: '大交接会话', cwd: '/workspace/demo' },
+    sourceAgent: 'GPT', sourceAgentId: 'gpt', turns,
+    recentTurnLimit: 500, maxBytes: 5 * 1024 * 1024,
+    artifacts: [], gitSnapshot: { available: false },
+  });
+
+  assert(payload.bytes > 64 * 1024, `交接包仍受旧上限限制：${payload.bytes}`);
+  assert(payload.bytes <= 5 * 1024 * 1024, `交接包超出 5 MB：${payload.bytes}`);
+  assert.equal(payload.maxBytes, 5 * 1024 * 1024);
+  assert.equal(payload.turnCount, 80);
+  assert.equal(payload.truncated, false);
+  assert.match(payload.content, /大交接问题-1/);
+  assert.match(payload.content, /大交接回答-80/);
+});
+
 test('handoff redaction covers pairing codes and common tokens', () => {
   const redacted = redactHandoffSecrets('配对码 12345678\npassword: hunter2\nsk-abcdefghijklmnopqrstuvwxyz');
   assert.doesNotMatch(redacted, /12345678|hunter2|sk-abcdefghijklmnopqrstuvwxyz/);

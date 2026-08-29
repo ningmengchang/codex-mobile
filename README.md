@@ -25,8 +25,9 @@
 
 - GPT 与 DeepSeek 继续使用各自原生的 `CODEX_HOME` 和会话，不做后台同步，也不修改任何 Codex 登录或模型配置。
 - 在具体聊天右上角菜单选择“复制交接包”，服务会从本地可见历史、方案、文档索引与 Git 状态生成标准 Markdown；该过程不调用模型，在账号没有额度时也能使用。
-- 交接包会自动隐藏常见 API Key、令牌、密码与配对码，并限制为默认 64 KiB、最近 20 个回合；复制前可以在弹窗中检查和编辑。
-- 复制后由用户手动切换 Agent，打开或新建目标会话并粘贴发送；需要反向接力时重复同一流程。
+- 交接包会自动隐藏常见 API Key、令牌、密码与配对码，默认最多 5 MiB、优先读取完整本地历史，原生分页最多读取最近 500 个回合。
+- 生成结果以 `0600` 权限保存在 `/var/lib/codex-mobile/handoffs`，同一 Agent 的同一会话重复生成时原子覆盖，不写入项目仓库。
+- 手机只复制一条很短的本机文件读取指令。切换 Agent 后，打开或新建目标会话并粘贴该指令；目标 Agent 必须运行在同一台 Codex Mobile 服务器上。需要反向接力时重复同一流程。
 - 手机端与 CLI 只有在连接同一台机器、使用同一 Agent 的 `CODEX_HOME`、恢复同一个原生会话 ID 时才会看到相同历史；同一会话同时只允许一个 writer。
 
 ## 能力
@@ -125,8 +126,8 @@ CODEX_MOBILE_MAX_FILE_BYTES=536870912
 CODEX_MOBILE_LOG_LEVEL=info
 CODEX_MOBILE_DEFAULT_MODEL=gpt-5.6-sol
 CODEX_MOBILE_DEFAULT_EFFORT=max
-CODEX_MOBILE_HANDOFF_MAX_BYTES=65536
-CODEX_MOBILE_HANDOFF_RECENT_TURNS=20
+CODEX_MOBILE_HANDOFF_MAX_BYTES=5242880
+CODEX_MOBILE_HANDOFF_RECENT_TURNS=500
 ```
 
 多个允许根目录使用 Linux 路径分隔符 `:`。服务默认不接受外网连接，不要把监听地址改成 `0.0.0.0`。

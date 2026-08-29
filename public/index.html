@@ -253,12 +253,12 @@
   <dialog id="handoffDialog" class="settings-dialog handoff-dialog">
     <header><strong>交接包</strong><button id="closeHandoffButton" class="icon-button" aria-label="关闭">×</button></header>
     <div class="settings-body handoff-body">
-      <p id="handoffMeta" class="handoff-meta">正在读取本地会话…</p>
+      <p id="handoffMeta" class="handoff-meta">正在生成本地交接文件…</p>
       <p id="handoffWarning" class="handoff-warning" hidden></p>
-      <textarea id="handoffContent" class="handoff-content" aria-label="交接包内容" spellcheck="false" disabled></textarea>
+      <textarea id="handoffContent" class="handoff-content" aria-label="接力读取指令" spellcheck="false" disabled></textarea>
       <div class="thread-confirm-actions handoff-actions">
         <button id="cancelHandoffButton" type="button">关闭</button>
-        <button id="copyHandoffButton" type="button" class="button primary" disabled>复制</button>
+        <button id="copyHandoffButton" type="button" class="button primary" aria-label="复制接力读取指令" disabled>复制</button>
       </div>
     </div>
   </dialog>
@@ -337,6 +337,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=113"></script>
+  <script type="module" src="/app.js?v=114"></script>
 </body>
 </html>

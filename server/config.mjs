@@ -105,9 +105,9 @@ export function loadConfig(overrides = {}) {
     maxBodyBytes: overrides.maxBodyBytes
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_BODY_BYTES, 2 * 1024 * 1024),
     handoffMaxBytes: overrides.handoffMaxBytes
-      ?? positiveInteger(process.env.CODEX_MOBILE_HANDOFF_MAX_BYTES, 64 * 1024),
+      ?? positiveInteger(process.env.CODEX_MOBILE_HANDOFF_MAX_BYTES, 5 * 1024 * 1024),
     handoffRecentTurns: overrides.handoffRecentTurns
-      ?? positiveInteger(process.env.CODEX_MOBILE_HANDOFF_RECENT_TURNS, 20),
+      ?? positiveInteger(process.env.CODEX_MOBILE_HANDOFF_RECENT_TURNS, 500),
     defaultModel,
     defaultEffort,
     ownershipHelper: overrides.ownershipHelper

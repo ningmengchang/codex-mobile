@@ -1383,7 +1383,9 @@ function closeHandoffDialog() {
   $('#handoffDialog').close();
   $('#handoffContent').value = '';
   $('#handoffContent').disabled = true;
+  $('#handoffContent').readOnly = false;
   $('#copyHandoffButton').disabled = true;
+  $('#copyHandoffButton').textContent = '复制';
   $('#handoffWarning').hidden = true;
   state.handoff = null;
 }
@@ -1400,22 +1402,28 @@ async function openThreadHandoffAction() {
   $('#threadHandoffAction').hidden = true;
   state.threadAction = null;
   state.handoff = { threadId: thread.id, loading: true };
-  $('#handoffMeta').textContent = '正在读取本地会话…';
+  $('#handoffMeta').textContent = '正在生成本地交接文件…';
   $('#handoffWarning').hidden = true;
   $('#handoffContent').value = '';
   $('#handoffContent').disabled = true;
+  $('#handoffContent').readOnly = false;
   $('#copyHandoffButton').disabled = true;
+  $('#copyHandoffButton').textContent = '复制';
   $('#handoffDialog').showModal();
   try {
     const payload = await api(`/api/threads/${encodeURIComponent(thread.id)}/handoff`);
     if (state.handoff?.threadId !== thread.id) return;
     state.handoff = { threadId: thread.id, loading: false, payload };
-    $('#handoffContent').value = payload.content ?? '';
+    const instruction = payload.instruction ?? payload.content ?? '';
+    $('#handoffContent').value = instruction;
     $('#handoffContent').disabled = false;
-    $('#copyHandoffButton').disabled = !payload.content;
+    $('#handoffContent').readOnly = payload.storage === 'file';
+    $('#copyHandoffButton').disabled = !instruction;
+    $('#copyHandoffButton').textContent = '复制';
     $('#handoffMeta').textContent = [
       payload.sourceAgentLabel ?? payload.sourceAgent,
-      formatBytes(payload.bytes ?? 0),
+      payload.storage === 'file' ? '本机文件' : '',
+      payload.maxBytes ? `${formatBytes(payload.bytes ?? 0)} / ${formatBytes(payload.maxBytes)}` : formatBytes(payload.bytes ?? 0),
       `${payload.turnCount ?? 0} 个已读取回合`,
       payload.truncated ? '已自动精简' : '',
     ].filter(Boolean).join(' · ');
@@ -1437,11 +1445,11 @@ async function copyHandoffPackage() {
   if (!textarea.value) return;
   try {
     await copyText(textarea.value);
-    toast('交接包已复制，可切换 Agent 后粘贴发送');
+    toast('读取指令已复制，可切换 Agent 后粘贴发送');
   } catch {
     textarea.focus();
     textarea.select();
-    toast('自动复制失败，内容已全选，请长按复制', 'error');
+    toast('自动复制失败，指令已全选，请长按复制', 'error');
   }
 }
 

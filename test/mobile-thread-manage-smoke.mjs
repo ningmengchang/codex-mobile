@@ -24,6 +24,7 @@ const bootstrap = {
   pendingRequests: [],
   projects: { current: { name: 'a', path: '/proj/a' }, parent: '/proj', root: '/proj', entries: [] },
 };
+const handoffInstruction = '请读取本机交接包文件：`/var/lib/codex-mobile/handoffs/codex-handoff-gpt-demo.md`\n\n读取完成后继续处理。';
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -81,8 +82,12 @@ try {
     if (pathname === '/api/threads/t-a/artifacts') return fulfillJson({ data: [] });
     if (pathname === '/api/threads/t-a/handoff') return fulfillJson({
       format: 'codex-mobile-handoff/v1',
-      content: '# Codex Mobile 交接包\n\n问题A\n\n会话A内容',
-      bytes: 55,
+      storage: 'file',
+      content: handoffInstruction,
+      instruction: handoffInstruction,
+      filePath: '/var/lib/codex-mobile/handoffs/codex-handoff-gpt-demo.md',
+      bytes: 128 * 1024,
+      maxBytes: 5 * 1024 * 1024,
       turnCount: 1,
       truncated: false,
       sourceAgent: 'gpt',
@@ -152,12 +157,17 @@ try {
     await page.screenshot({ path: `${process.env.HANDOFF_SCREENSHOT}-light.png`, fullPage: true });
     await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
   }
-  if (!await page.locator('#handoffContent').inputValue().then((value) => value.includes('问题A'))) {
-    throw new Error('交接包没有加载当前会话内容');
+  if (!await page.locator('#handoffContent').inputValue().then((value) => value === handoffInstruction)) {
+    throw new Error('交接文件没有加载短读取指令');
   }
-  await page.locator('#handoffContent').fill('# 已编辑交接包\n\n补充说明');
+  if (!await page.locator('#handoffContent').evaluate((element) => element.readOnly)) {
+    throw new Error('文件交接模式不应允许在手机端编辑服务端文件内容');
+  }
+  if (await page.locator('#copyHandoffButton').textContent() !== '复制') {
+    throw new Error('交接文件复制按钮文案错误');
+  }
   await page.locator('#copyHandoffButton').click();
-  await page.waitForFunction(() => window.__copiedText === '# 已编辑交接包\n\n补充说明', null, { timeout: 5_000 });
+  await page.waitForFunction((expected) => window.__copiedText === expected, handoffInstruction, { timeout: 5_000 });
   await page.locator('#closeHandoffButton').click();
   await page.locator('#chatThreadMoreButton').click();
   await page.locator('#threadActionDialog[open]').waitFor({ timeout: 5_000 });

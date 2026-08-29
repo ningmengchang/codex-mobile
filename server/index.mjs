@@ -14,6 +14,7 @@ import { createDingTalk } from './dingtalk.mjs';
 import { EventHub } from './events.mjs';
 import { createFavoritesStore } from './favorites.mjs';
 import { classifyFile, fileMetadata, isDocumentPath, mimeType } from './files.mjs';
+import { createHandoffFileStore } from './handoff-files.mjs';
 import { buildHandoffPackage, readGitSnapshot } from './handoff-package.mjs';
 import { listSkills } from './skills.mjs';
 import { createSkillMarket } from './skill-market.mjs';
@@ -380,25 +381,41 @@ function hasHandoffItems(turns) {
 
 async function handoffTurns(bridge, rolloutHistory, thread, recentTurns) {
   try {
-    const [oldest, latest] = await Promise.all([
-      bridge.request('thread/turns/list', {
+    const recovered = await rolloutHistory.readTurns(thread);
+    if (recovered.length && hasHandoffItems(recovered)) return recovered;
+  } catch {}
+
+  try {
+    const limit = Math.min(Math.max(Number(recentTurns) || 1, 1), 2000);
+    const oldest = await bridge.request('thread/turns/list', {
+      threadId: thread.id,
+      pageSize: 1,
+      sortDirection: 'asc',
+      itemsView: 'full',
+    });
+    const latestDescending = [];
+    const cursors = new Set();
+    let cursor;
+    while (latestDescending.length < limit) {
+      const latest = await bridge.request('thread/turns/list', {
         threadId: thread.id,
-        pageSize: 1,
-        sortDirection: 'asc',
-        itemsView: 'full',
-      }),
-      bridge.request('thread/turns/list', {
-        threadId: thread.id,
-        pageSize: Math.min(Math.max(recentTurns, 1), 50),
+        cursor,
+        pageSize: Math.min(50, limit - latestDescending.length),
         sortDirection: 'desc',
         itemsView: 'full',
-      }),
-    ]);
-    const latestChronological = [...(latest?.data ?? [])].reverse();
+      });
+      const page = latest?.data ?? [];
+      latestDescending.push(...page);
+      const nextCursor = latest?.nextCursor;
+      if (!page.length || !nextCursor || cursors.has(nextCursor)) break;
+      cursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+    const latestChronological = latestDescending.reverse();
     const nativeTurns = uniqueTurns([...(oldest?.data ?? []), ...latestChronological]);
     if (nativeTurns.length && hasHandoffItems(nativeTurns)) return nativeTurns;
   } catch {}
-  return rolloutHistory.readTurns(thread);
+  return [];
 }
 
 function userInput(body, cwd, config) {
@@ -503,6 +520,7 @@ export function createCodexMobileServer(options = {}) {
   const tracker = options.tracker ?? new ArtifactTracker(config, hub);
   const dingtalk = options.dingtalk ?? createDingTalk();
   const favorites = options.favorites ?? createFavoritesStore(config);
+  const handoffFiles = options.handoffFiles ?? createHandoffFileStore(config);
   const skillMarket = options.skillMarket ?? createSkillMarket(config);
   const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
   const conversationArtifacts = options.conversationArtifacts ?? createConversationArtifacts(config, {
@@ -1226,7 +1244,7 @@ export function createCodexMobileServer(options = {}) {
           });
         const backendId = backendManager.activeId();
         const backend = backendManager.get(backendId);
-        const payload = buildHandoffPackage({
+        const handoffPackage = buildHandoffPackage({
           thread: { ...result.thread, ...meta, cwd },
           turns,
           artifacts,
@@ -1237,7 +1255,20 @@ export function createCodexMobileServer(options = {}) {
           maxBytes: config.handoffMaxBytes,
           recentTurnLimit: config.handoffRecentTurns,
         });
-        json(response, 200, payload);
+        const stored = await handoffFiles.write({
+          content: handoffPackage.content,
+          sourceAgentId: backendId,
+          threadId: result.thread.id,
+        });
+        json(response, 200, {
+          ...handoffPackage,
+          storage: 'file',
+          content: stored.instruction,
+          instruction: stored.instruction,
+          fileName: stored.fileName,
+          filePath: stored.filePath,
+          fileBytes: stored.bytes,
+        });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns$/);
@@ -1572,7 +1603,7 @@ export function createCodexMobileServer(options = {}) {
 
   return {
     server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity,
-    conversationArtifacts, backendManager,
+    conversationArtifacts, backendManager, handoffFiles,
   };
 }
 
