@@ -381,11 +381,6 @@ function hasHandoffItems(turns) {
 
 async function handoffTurns(bridge, rolloutHistory, thread, recentTurns) {
   try {
-    const recovered = await rolloutHistory.readTurns(thread);
-    if (recovered.length && hasHandoffItems(recovered)) return recovered;
-  } catch {}
-
-  try {
     const limit = Math.min(Math.max(Number(recentTurns) || 1, 1), 2000);
     const oldest = await bridge.request('thread/turns/list', {
       threadId: thread.id,
@@ -414,6 +409,11 @@ async function handoffTurns(bridge, rolloutHistory, thread, recentTurns) {
     const latestChronological = latestDescending.reverse();
     const nativeTurns = uniqueTurns([...(oldest?.data ?? []), ...latestChronological]);
     if (nativeTurns.length && hasHandoffItems(nativeTurns)) return nativeTurns;
+  } catch {}
+
+  try {
+    const recovered = await rolloutHistory.readTurns(thread);
+    if (recovered.length && hasHandoffItems(recovered)) return recovered;
   } catch {}
   return [];
 }

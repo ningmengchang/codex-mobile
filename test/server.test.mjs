@@ -250,6 +250,13 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
   const app = createCodexMobileServer({
     config,
     bridge,
+    rolloutHistory: {
+      readTurns: async () => [{
+        id: 'incomplete-rollout-turn', status: 'completed',
+        items: [{ id: 'incomplete-plan', type: 'plan', text: '不完整的本地方案记录' }],
+      }],
+      resolvePage: async () => null,
+    },
     writerRecycleDelayMs: 5,
     dingtalk,
     skillMarket,
@@ -345,6 +352,7 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.match(storedHandoff, /实现手动交接包/);
     assert.match(storedHandoff, /下一步补齐前端复制入口/);
     assert.match(storedHandoff, /分支：master/);
+    assert.doesNotMatch(storedHandoff, /不完整的本地方案记录/);
     assert.equal(fs.statSync(handoffPayload.filePath).mode & 0o777, 0o600);
     assert.equal(handoffPayload.fileBytes, Buffer.byteLength(storedHandoff, 'utf8'));
     assert.equal(handoffPayload.bytes, handoffPayload.fileBytes);
