@@ -118,6 +118,40 @@ try {
   await page.locator('#threadHandoffAction').click();
   await page.locator('#handoffDialog[open]').waitFor({ timeout: 5_000 });
   await page.locator('#handoffContent:not([disabled])').waitFor({ timeout: 5_000 });
+  const handoffButtonMetrics = await page.evaluate(() => {
+    const metrics = (selector) => {
+      const element = document.querySelector(selector);
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { width: rect.width, height: rect.height, fontSize: Number.parseFloat(style.fontSize) };
+    };
+    return {
+      headerClose: metrics('#closeHandoffButton'),
+      footerClose: metrics('#cancelHandoffButton'),
+      copy: metrics('#copyHandoffButton'),
+      dialog: metrics('#handoffDialog'),
+      body: metrics('#handoffDialog .handoff-body'),
+      content: metrics('#handoffContent'),
+      actions: metrics('#handoffDialog .handoff-actions'),
+    };
+  });
+  if (handoffButtonMetrics.headerClose.width > 28.5 || handoffButtonMetrics.headerClose.height > 28.5) {
+    throw new Error(`交接包顶部关闭按钮仍然过大：${JSON.stringify(handoffButtonMetrics.headerClose)}`);
+  }
+  for (const [name, metrics] of Object.entries({ footerClose: handoffButtonMetrics.footerClose, copy: handoffButtonMetrics.copy })) {
+    if (metrics.height > 28.5 || metrics.width > 56 || metrics.fontSize > 10.5) {
+      throw new Error(`交接包${name}按钮仍然过大：${JSON.stringify(metrics)}`);
+    }
+  }
+  if (handoffButtonMetrics.actions.height > 30 || handoffButtonMetrics.content.height < handoffButtonMetrics.body.height * 0.7) {
+    throw new Error(`交接包编辑区与按钮区布局异常：${JSON.stringify(handoffButtonMetrics)}`);
+  }
+  if (process.env.HANDOFF_SCREENSHOT) {
+    await page.screenshot({ path: `${process.env.HANDOFF_SCREENSHOT}-dark.png`, fullPage: true });
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    await page.screenshot({ path: `${process.env.HANDOFF_SCREENSHOT}-light.png`, fullPage: true });
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  }
   if (!await page.locator('#handoffContent').inputValue().then((value) => value.includes('问题A'))) {
     throw new Error('交接包没有加载当前会话内容');
   }
@@ -180,7 +214,7 @@ try {
   const chatEmpty = await page.evaluate(() => !document.querySelector('#emptyState').hidden);
   if (!chatEmpty) throw new Error('删除当前会话后聊天区未清空');
 
-  process.stdout.write(JSON.stringify({ rowText, favoriteText, listAfterDelete, favoriteAfterDelete, chatEmpty }));
+  process.stdout.write(JSON.stringify({ handoffButtonMetrics, rowText, favoriteText, listAfterDelete, favoriteAfterDelete, chatEmpty }));
 } finally {
   await browser.close();
 }
