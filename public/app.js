@@ -5,6 +5,7 @@ import { renderMermaid, setMermaidTheme } from './js/mermaid-renderer.js';
 import { initKeyboardInsets } from './js/keyboard.js';
 import { initFileShare, openFileShare } from './js/dingtalk.js';
 import { initSkillMarket } from './js/skill-market.js';
+import { initImageInput, modelSupportsImages } from './js/image-input.js';
 import { debug } from './js/debug.js';
 import { completedRuntimeActivity } from './js/turn-state.js';
 import {
@@ -40,6 +41,8 @@ import {
 } from './js/chat-view.js';
 
 let skillsCache = null;
+let imageInput = null;
+let composerHeightFrame = 0;
 
 function applyTheme(theme, options = {}) {
   const next = theme === 'light' ? 'light' : 'dark';
@@ -96,6 +99,7 @@ function showApp() {
   $('#startupScreen').hidden = true;
   $('#loginScreen').hidden = true;
   $('#app').hidden = false;
+  syncComposerHeight();
   if (state.currentThread) {
     const chat = $('#chatView');
     chat.scrollTop = chat.scrollHeight;
@@ -503,6 +507,7 @@ function renderModels() {
     select.add(new Option(selectedModel, selectedModel));
   }
   select.value = selectedModel || '';
+  imageInput?.setSupported(modelSupportsImages(state.bootstrap?.models, effectiveModel()));
 }
 
 function effectiveModel() {
@@ -536,6 +541,7 @@ function setCurrentProjectDirectory(projectPath, options = {}) {
     state.turnModes.clear();
     state.questionCursor = 0;
     state.selectedMentions = [];
+    if (!options.preserveImageDraft) imageInput?.clear();
     state.currentArtifact = null;
     localStorage.removeItem(UI_STATE.thread);
     clearArtifactState();
@@ -1873,7 +1879,11 @@ async function newThread(options = {}) {
     toast('请先选择项目');
     return;
   }
-  setCurrentProjectDirectory(cwd, { clearConversation: true });
+  if (!options.preserveImageDraft) imageInput?.clear();
+  setCurrentProjectDirectory(cwd, {
+    clearConversation: true,
+    preserveImageDraft: options.preserveImageDraft === true,
+  });
   try {
     const result = await post('/api/threads', {
       cwd,
@@ -1979,6 +1989,7 @@ async function markThreadRead(threadId) {
 
 async function openThread(threadId, options = {}) {
   debug.log('thread', 'open-start', { threadId });
+  if (state.currentThread?.id && state.currentThread.id !== threadId) imageInput?.clear();
   const seq = ++state.threadLoadSeq;
   showTab('chat', { history: options.history ?? 'push', threadId });
   const cached = state.threadCache.get(threadId);
@@ -3055,28 +3066,42 @@ async function sendPrompt(event) {
   event.preventDefault();
   const input = $('#promptInput');
   const text = input.value.trim();
-  if (!text) return;
-  if (!state.currentThread) await newThread();
-  if (!state.currentThread) return;
-  const body = {
-    text,
-    cwd: state.currentProject,
-    mentions: state.selectedMentions,
-    model: effectiveModel(),
-    effort: $('#effortSelect').value || undefined,
-    mode: state.mode,
-    approvalsReviewer: state.approvalsReviewer,
-  };
-  input.value = '';
-  state.selectedMentions = [];
-  renderMentions();
-  resizeComposer();
-  saveUiState();
+  const hasImages = imageInput?.hasImages() ?? false;
+  if (!text && !hasImages) return;
   $('#sendButton').disabled = true;
+  input.readOnly = true;
+  imageInput?.setBusy(true);
   try {
+    if (!state.currentThread) await newThread({ preserveImageDraft: true });
+    if (!state.currentThread) return;
+    const mentions = [...state.selectedMentions];
+    const uploadedImages = hasImages ? await imageInput.uploadAll() : [];
+    const body = {
+      text,
+      images: uploadedImages.map((image) => ({ token: image.token })),
+      cwd: state.currentProject,
+      mentions,
+      model: effectiveModel(),
+      effort: $('#effortSelect').value || undefined,
+      mode: state.mode,
+      approvalsReviewer: state.approvalsReviewer,
+    };
+    const localUserItem = {
+      id: `local-${Date.now()}`,
+      type: 'userMessage',
+      content: [
+        ...(imageInput?.localContent(uploadedImages) ?? []),
+        ...(text ? [{ type: 'text', text }] : []),
+      ],
+    };
     let result;
     if (state.activeTurnId) {
+      const activeTurnId = state.activeTurnId;
       result = await post(`/api/threads/${encodeURIComponent(state.currentThread.id)}/steer`, { ...body, turnId: state.activeTurnId });
+      upsertItem(activeTurnId, localUserItem);
+      updateTimelineItem(activeTurnId, localUserItem);
+      state.pinnedToBottom = true;
+      scrollTimelineToBottom();
       toast('已追加到当前任务');
     } else {
       state.pendingTurnMode = state.mode;
@@ -3091,7 +3116,7 @@ async function sendPrompt(event) {
         const updatedThread = {
           ...(threadIndex >= 0 ? state.threads[threadIndex] : {}),
           ...state.currentThread,
-          preview: text,
+          preview: text || `发送了 ${uploadedImages.length} 张图片`,
           updatedAt: Date.now(),
         };
         if (threadIndex >= 0) state.threads[threadIndex] = updatedThread;
@@ -3134,7 +3159,6 @@ async function sendPrompt(event) {
         const extra = existingItems.filter((item) => !freshIds.has(item.id));
         turn.items = dedupeItems(extra.length ? [...result.turn.items, ...extra] : result.turn.items);
       }
-      const localUserItem = { id: `local-${Date.now()}`, type: 'userMessage', content: [{ type: 'text', text }] };
       upsertItem(result.turn.id, localUserItem);
       if (turnExisted) {
         updateTimelineItem(result.turn.id, localUserItem);
@@ -3147,14 +3171,21 @@ async function sendPrompt(event) {
       scrollTimelineToBottom();
       state.questionCursor = 0;
     }
+    input.value = '';
+    state.selectedMentions = [];
+    imageInput?.clear();
+    renderMentions();
+    resizeComposer();
+    saveUiState();
   } catch (error) {
     state.pendingTurnMode = null;
-    input.value = text;
     renderModeControls();
     renderPlanDecision();
     toast(error.message, 'error');
   } finally {
     $('#sendButton').disabled = false;
+    input.readOnly = false;
+    imageInput?.setBusy(false);
   }
 }
 
@@ -3404,6 +3435,16 @@ function resizeComposer() {
   const input = $('#promptInput');
   input.style.height = 'auto';
   input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  syncComposerHeight();
+}
+
+function syncComposerHeight() {
+  if (composerHeightFrame) return;
+  composerHeightFrame = requestAnimationFrame(() => {
+    composerHeightFrame = 0;
+    const height = Math.ceil($('#composer').getBoundingClientRect().height);
+    if (height > 0) document.documentElement.style.setProperty('--composer-height', `${height}px`);
+  });
 }
 
 $('#pairForm').addEventListener('submit', async (event) => {
@@ -3434,6 +3475,11 @@ $('#promptInput').addEventListener('input', () => {
   scheduleUiStateSave();
 });
 $('#timeline').addEventListener('click', async (event) => {
+  const imageButton = event.target.closest('[data-chat-image-url]');
+  if (imageButton) {
+    imageInput?.openPreview(imageButton.dataset.chatImageUrl, imageButton.dataset.chatImageName || '图片预览');
+    return;
+  }
   const button = event.target.closest('.copy-question');
   if (!button) return;
   try {
@@ -3549,6 +3595,7 @@ $('#backendSelect').addEventListener('change', async (event) => {
 $('#modelSelect').addEventListener('change', (event) => {
   state.model = event.target.value;
   localStorage.setItem(backendStorageKey('codex-mobile-model'), state.model);
+  imageInput?.setSupported(modelSupportsImages(state.bootstrap?.models, effectiveModel()));
 });
 $('#effortSelect').addEventListener('change', (event) => {
   state.effort = event.target.value;
@@ -3595,6 +3642,9 @@ $('#refreshArtifactsButton').addEventListener('click', () => loadArtifacts().cat
 $('#loadOlderButton').addEventListener('click', () => loadOlderTurns().catch((error) => toast(error.message, 'error')));
 initChatScroll();
 initKeyboardInsets();
+imageInput = initImageInput({ state, onLayoutChange: syncComposerHeight });
+imageInput.setSupported(modelSupportsImages(state.bootstrap?.models, effectiveModel()));
+if ('ResizeObserver' in window) new ResizeObserver(syncComposerHeight).observe($('#composer'));
 initFileShare();
 initSkillMarket({
   refreshInstalled: async () => {

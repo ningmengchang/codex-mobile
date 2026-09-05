@@ -13,6 +13,7 @@ const required = {
   'ClientRequest.ts': ['thread/start', 'thread/resume', 'thread/list', 'thread/read', 'thread/name/set', 'thread/delete', 'turn/start', 'turn/steer', 'turn/interrupt', 'model/list', 'collaborationMode/list', 'account/read'],
   'ServerRequest.ts': ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/tool/requestUserInput', 'mcpServer/elicitation/request', 'item/permissions/requestApproval'],
   'ServerNotification.ts': ['turn/started', 'turn/completed', 'turn/plan/updated', 'item/started', 'item/completed', 'item/agentMessage/delta', 'turn/diff/updated'],
+  'v2/UserInput.ts': ['type": "localImage'],
 };
 
 try {

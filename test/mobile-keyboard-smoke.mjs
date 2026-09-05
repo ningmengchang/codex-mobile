@@ -98,6 +98,7 @@ try {
     return {
       keyboardOpen: document.body.classList.contains('keyboard-open'),
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
+      composerHeight: Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--composer-height'))),
       composerBottom: Math.round(composer.bottom),
       navigationRemoved: !document.querySelector('.bottom-nav'),
       fullscreenDisplay: getComputedStyle(fullscreen).display,
@@ -111,7 +112,9 @@ try {
   if (!opened.navigationRemoved) throw new Error(`键盘打开时仍存在底部导航：${JSON.stringify(opened)}`);
   if (opened.fullscreenDisplay === 'none') throw new Error(`键盘打开时全屏按钮不应隐藏：${JSON.stringify(opened)}`);
   if (opened.fullscreenBottom <= opened.scrollQuestionBottom) throw new Error(`全屏按钮未保持在上一个问题上方：${JSON.stringify(opened)}`);
-  if (Math.abs(opened.fullscreenBottom - 462) > 2 || Math.abs(opened.scrollQuestionBottom - 422) > 2) {
+  if (Math.abs(opened.fullscreenBottom - (opened.composerHeight + 388)) > 2
+      || Math.abs(opened.scrollQuestionBottom - (opened.composerHeight + 348)) > 2
+      || Math.abs(opened.scrollLatestBottom - (opened.composerHeight + 308)) > 2) {
     throw new Error(`键盘打开时悬浮按钮未随键盘上移：${JSON.stringify(opened)}`);
   }
 
@@ -124,6 +127,7 @@ try {
     return {
       keyboardOpen: document.body.classList.contains('keyboard-open'),
       kbInset: document.documentElement.style.getPropertyValue('--kb-inset'),
+      composerHeight: Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--composer-height'))),
       composerBottom: Math.round(composer.bottom),
       navigationRemoved: !document.querySelector('.bottom-nav'),
       fullscreenDisplay: getComputedStyle(document.querySelector('#fullscreenButton')).display,
@@ -133,7 +137,7 @@ try {
   if (closed.keyboardOpen || closed.kbInset !== '0px' || !closed.navigationRemoved) {
     throw new Error(`键盘关闭后未恢复：${JSON.stringify(closed)}`);
   }
-  if (closed.fullscreenDisplay === 'none' || Math.abs(closed.fullscreenBottom - 162) > 2) {
+  if (closed.fullscreenDisplay === 'none' || Math.abs(closed.fullscreenBottom - (closed.composerHeight + 88)) > 2) {
     throw new Error(`键盘关闭后全屏按钮位置未恢复：${JSON.stringify(closed)}`);
   }
   process.stdout.write(`${JSON.stringify({ opened, closed })}\n`);

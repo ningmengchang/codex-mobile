@@ -73,11 +73,16 @@ export function isToolItem(item) {
   return !MAIN_ITEM_TYPES.has(item.type);
 }
 
-function itemContentKey(item) {
+export function itemContentKey(item) {
   if (!item) return null;
   if (item.type === 'userMessage') {
     const text = (item.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n').trim();
-    return text ? `userMessage:${text}` : `userMessage:id:${item.id}`;
+    const images = (item.content ?? [])
+      .filter((part) => ['local_image', 'localImage'].includes(part.type))
+      .map((part) => part.imageId ?? part.path ?? part.previewUrl ?? '')
+      .filter(Boolean)
+      .join(',');
+    return text || images ? `userMessage:${images}:${text}` : `userMessage:id:${item.id}`;
   }
   if (item.type === 'agentMessage') {
     return `agentMessage:${(item.text ?? '').trim()}`;
@@ -146,7 +151,16 @@ export function turnArtifactsHtml(turnId, index = buildTurnArtifactIndex(state.a
 export function itemInnerHtml(item) {
   if (item.type === 'userMessage') {
     const text = (item.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
-    return `<div class="bubble">${markdown(text)}<button type="button" class="copy-question" data-copy-text="${escapeHtml(text)}" aria-label="复制问题" title="复制问题">⧉</button></div>`;
+    const images = (item.content ?? []).filter((part) => ['local_image', 'localImage'].includes(part.type));
+    const imageHtml = images.length ? `<div class="user-image-grid${images.length === 1 ? ' single' : ''}">${images.map((part) => {
+      const name = part.name || '图片';
+      if (!part.previewUrl) return '<span class="message-image-missing">图片暂不可预览</span>';
+      return `<button type="button" class="user-image-button" data-chat-image-url="${escapeHtml(part.previewUrl)}" data-chat-image-name="${escapeHtml(name)}" aria-label="预览${escapeHtml(name)}"><img src="${escapeHtml(part.previewUrl)}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"></button>`;
+    }).join('')}</div>` : '';
+    const classes = ['bubble', images.length ? 'has-images' : '', text ? 'has-text' : ''].filter(Boolean).join(' ');
+    const textHtml = text ? `<div class="user-message-text">${markdown(text)}</div>` : '';
+    const copyHtml = text ? `<button type="button" class="copy-question" data-copy-text="${escapeHtml(text)}" aria-label="复制问题" title="复制问题">⧉</button>` : '';
+    return `<div class="${classes}">${imageHtml}${textHtml}${copyHtml}</div>`;
   }
   if (item.type === 'agentMessage') {
     return `<div class="agent-card ${state.activeTurnId ? 'status-running' : ''}">${markdown(item.text ?? '')}</div>`;
@@ -156,7 +170,8 @@ export function itemInnerHtml(item) {
 
 export function itemHtml(item, turnId) {
   if (!item) return '';
-  const attrs = `data-turn-id="${escapeHtml(turnId ?? '')}" data-item-id="${escapeHtml(item.id ?? '')}"`;
+  const contentKey = itemContentKey(item);
+  const attrs = `data-turn-id="${escapeHtml(turnId ?? '')}" data-item-id="${escapeHtml(item.id ?? '')}"${contentKey ? ` data-content-key="${escapeHtml(contentKey)}"` : ''}`;
   if (item.type === 'userMessage') {
     return `<article class="message user" ${attrs}>${itemInnerHtml(item)}</article>`;
   }
@@ -225,11 +240,10 @@ export function upsertItem(turnId, item) {
   const index = turn.items.findIndex((candidate) => candidate.id === item.id);
   if (index >= 0) turn.items[index] = { ...turn.items[index], ...item };
   else if (item.type === 'userMessage') {
-    const itemText = (item.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+    const key = itemContentKey(item);
     const duplicateIndex = turn.items.findIndex((candidate) => {
       if (candidate.type !== 'userMessage') return false;
-      const candidateText = (candidate.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
-      return candidateText === itemText;
+      return itemContentKey(candidate) === key;
     });
     if (duplicateIndex >= 0) turn.items[duplicateIndex] = { ...turn.items[duplicateIndex], ...item };
     else turn.items.push(item);

@@ -70,7 +70,10 @@ class FakeBridge extends EventEmitter {
       rateLimitsByLimitId: null,
       rateLimitResetCredits: { availableCount: 1, credits: null },
     };
-    if (method === 'model/list') return { data: [{ id: 'test-model', displayName: 'Test', isDefault: true }] };
+    if (method === 'model/list') return { data: [
+      { id: 'test-model', displayName: 'Test', isDefault: true, inputModalities: ['text', 'image'] },
+      { id: 'text-only-model', displayName: 'Text only', inputModalities: ['text'] },
+    ] };
     if (method === 'collaborationMode/list') return { data: [
       { name: 'Plan', mode: 'plan', model: null, reasoning_effort: 'medium' },
       { name: 'Default', mode: 'default', model: null, reasoning_effort: null },
@@ -328,6 +331,21 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(catalogPayload.models[0].id, 'test-model');
     assert.deepEqual(catalogPayload.collaborationModes.map((mode) => mode.mode), ['plan', 'default']);
     assert.equal(catalogPayload.defaultModel, 'pinned-model');
+    const chatPng = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('mobile-chat-image'),
+    ]);
+    const chatImageUpload = await fetch(`${base}/api/chat-images?name=${encodeURIComponent('测试截图.png')}`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'image/png' }, body: chatPng,
+    });
+    assert.equal(chatImageUpload.status, 201);
+    const chatImage = (await chatImageUpload.json()).image;
+    assert.equal(chatImage.name, '测试截图.png');
+    assert.equal(chatImage.mimeType, 'image/png');
+    const chatImagePreview = await fetch(`${base}${chatImage.previewUrl}`, { headers: { Cookie: cookie } });
+    assert.equal(chatImagePreview.status, 200);
+    assert.equal(chatImagePreview.headers.get('content-type'), 'image/png');
+    assert.equal(Buffer.from(await chatImagePreview.arrayBuffer()).equals(chatPng), true);
     bridge.threadTurns = [
       { id: 'handoff-turn-1', status: 'completed', items: [
         { id: 'handoff-user-1', type: 'userMessage', content: [{ type: 'text', text: '实现手动交接包' }] },
@@ -588,19 +606,29 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     bridge.activeWriterThreads.clear();
     const planned = await fetch(`${base}/api/threads/thread-1/turns`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
-        cwd: project, text: '先制定方案', mode: 'plan', approvalsReviewer: 'user',
+        cwd: project, text: '先制定方案', images: [{ token: chatImage.token }], mode: 'plan', approvalsReviewer: 'user',
       }),
     });
     assert.equal(planned.status, 201);
     const planCall = bridge.calls.findLast((call) => call.method === 'turn/start');
     assert.equal(planCall.params.approvalPolicy, 'never');
     assert.equal(planCall.params.approvalsReviewer, 'user');
+    assert.equal(planCall.params.input[0].type, 'localImage');
+    assert.equal(planCall.params.input[0].path.startsWith(path.join(dataDir, 'chat-images')), true);
+    assert.deepEqual(planCall.params.input[1], { type: 'text', text: '先制定方案', text_elements: [] });
     assert.deepEqual(planCall.params.sandboxPolicy, { type: 'readOnly', networkAccess: false });
     assert.equal(planCall.params.collaborationMode.mode, 'plan');
     assert.equal(planCall.params.collaborationMode.settings.model, 'pinned-model');
     assert.equal(planCall.params.collaborationMode.settings.reasoning_effort, 'max');
     assert.match(planCall.params.collaborationMode.settings.developer_instructions, /每个用户回合最多调用一次 request_user_input/);
     assert.match(planCall.params.collaborationMode.settings.developer_instructions, /同一用户回合不得再次调用 request_user_input/);
+    const unsupportedImage = await fetch(`${base}/api/threads/thread-1/turns`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({
+        cwd: project, text: '分析图片', images: [{ token: chatImage.token }], model: 'text-only-model',
+      }),
+    });
+    assert.equal(unsupportedImage.status, 400);
+    assert.equal((await unsupportedImage.json()).error, 'MODEL_IMAGE_UNSUPPORTED');
     bridge.threadList = [{
       id: 'thread-1', cwd: project, name: '并行测试', preview: '正在规划', status: { type: 'active' }, updatedAt: 3,
     }];
@@ -880,6 +908,18 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(directoryBody.data[0].name, '最终报告.md');
     assert.equal(directoryBody.data[0].fileKind, 'markdown');
     assert.equal(directoryBody.parent.name, 'demo');
+    const positionedFile = await fetch(`${base}/api/files/resolve`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: `${markdownPath}:135`, cwd: project }),
+    });
+    assert.equal(positionedFile.status, 200);
+    assert.equal((await positionedFile.json()).artifact.name, path.basename(markdownPath));
+    const positionedRelativeFile = await fetch(`${base}/api/files/resolve`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: `${path.relative(project, markdownPath)}:66:4`, cwd: project }),
+    });
+    assert.equal(positionedRelativeFile.status, 200);
+    assert.equal((await positionedRelativeFile.json()).artifact.name, path.basename(markdownPath));
     const escapedFile = await fetch(`${base}/api/files/resolve`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: '/etc/hostname', cwd: project }),

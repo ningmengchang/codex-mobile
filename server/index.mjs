@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AppServerBridge, approvalResponse } from './app-server.mjs';
 import { ArtifactTracker } from './artifacts.mjs';
+import { createChatImageStore } from './chat-images.mjs';
 import { createCodexBackendManager } from './codex-backends.mjs';
 import { createConversationArtifacts } from './conversation-artifacts.mjs';
 import { clearSessionCookie, COOKIE_NAME, exchangePairingCode, requireSession, sessionCookie } from './auth.mjs';
@@ -51,6 +52,7 @@ const STATIC_FILES = new Map([
   ['/js/dingtalk.js', ['js/dingtalk.js', 'text/javascript; charset=utf-8']],
   ['/js/debug.js', ['js/debug.js', 'text/javascript; charset=utf-8']],
   ['/js/skill-market.js', ['js/skill-market.js', 'text/javascript; charset=utf-8']],
+  ['/js/image-input.js', ['js/image-input.js', 'text/javascript; charset=utf-8']],
   ['/vendor/marked.esm.js', ['vendor/marked.esm.js', 'text/javascript; charset=utf-8']],
   ['/vendor/purify.js', ['vendor/purify.js', 'text/javascript; charset=utf-8']],
   ['/vendor/mermaid.min.js', ['vendor/mermaid.min.js', 'text/javascript; charset=utf-8']],
@@ -219,7 +221,14 @@ function resolveLinkedPath(rawPath, cwd, config) {
       candidate = path.resolve(validateProject(cwd, config), candidate);
     }
   }
-  return assertAllowedPath(candidate, config.allowedRoots);
+  try {
+    return assertAllowedPath(candidate, config.allowedRoots);
+  } catch (error) {
+    if (error?.code !== 'NOT_FOUND') throw error;
+    const withoutPosition = candidate.replace(/:(\d+)(?::\d+)?$/, '');
+    if (withoutPosition === candidate) throw error;
+    return assertAllowedPath(withoutPosition, config.allowedRoots);
+  }
 }
 
 function linkedArtifact(filePath, config) {
@@ -418,11 +427,14 @@ async function handoffTurns(bridge, rolloutHistory, thread, recentTurns) {
   return [];
 }
 
-function userInput(body, cwd, config) {
-  if (typeof body.text !== 'string' || !body.text.trim()) {
-    throw new AppError('请输入要交给 Codex 的内容。', 400, 'TEXT_REQUIRED');
+function userInput(body, cwd, config, chatImages) {
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  const images = chatImages?.resolveInputs(body.images ?? []) ?? [];
+  if (!text && !images.length) {
+    throw new AppError('请输入文字或选择图片。', 400, 'INPUT_REQUIRED');
   }
-  const input = [{ type: 'text', text: body.text.trim(), text_elements: [] }];
+  const input = [...images];
+  if (text) input.push({ type: 'text', text, text_elements: [] });
   for (const mention of Array.isArray(body.mentions) ? body.mentions : []) {
     const absolute = assertAllowedPath(path.isAbsolute(mention) ? mention : path.join(cwd, mention), config.allowedRoots);
     if (!isInside(cwd, absolute)) throw new AppError('引用文件不在当前项目中。', 403, 'MENTION_OUTSIDE_PROJECT');
@@ -442,6 +454,12 @@ function turnSettings(body, cwd, catalogs, config) {
     ?? catalogs.models[0]?.id;
   const model = body.model ? String(body.model) : (config.defaultModel ?? defaultModel);
   if (!model) throw new AppError('Codex 没有返回可用模型，请刷新页面后重试。', 503, 'MODEL_UNAVAILABLE');
+  const selectedModel = catalogs.models.find((item) => (item.id ?? item.model ?? item.slug) === model);
+  const inputModalities = selectedModel?.inputModalities ?? selectedModel?.input_modalities;
+  if (Array.isArray(body.images) && body.images.length > 0 && Array.isArray(inputModalities)
+    && !inputModalities.some((item) => ['image', 'images', 'text_and_image'].includes(String(item).toLowerCase()))) {
+    throw new AppError('当前模型不支持图片输入，请切换模型后重试。', 400, 'MODEL_IMAGE_UNSUPPORTED');
+  }
   const preset = catalogs.collaborationModes.find((item) => item.mode === mode);
   const effort = body.effort
     ? String(body.effort)
@@ -508,7 +526,7 @@ function wireBridge(bridge, tracker, threadActivity, hub, config, lifecycle = {}
     if (message.method === 'thread/closed') {
       lifecycle.onThreadClosed?.(params.threadId ?? params.thread_id ?? params.thread?.id);
     }
-    hub.publish('codex', message);
+    hub.publish('codex', lifecycle.decorateCodexMessage?.(message) ?? message);
   });
 }
 
@@ -523,6 +541,7 @@ export function createCodexMobileServer(options = {}) {
   const handoffFiles = options.handoffFiles ?? createHandoffFileStore(config);
   const skillMarket = options.skillMarket ?? createSkillMarket(config);
   const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
+  const chatImages = options.chatImages ?? createChatImageStore(config);
   const conversationArtifacts = options.conversationArtifacts ?? createConversationArtifacts(config, {
     onReady: ({ threadId }) => hub.publish('artifact-history-ready', { threadId }),
     onError: ({ threadId, error }) => hub.publish('artifact-error', { threadId, message: error.message }),
@@ -889,7 +908,10 @@ export function createCodexMobileServer(options = {}) {
     })().finally(() => { backendSwitchPromise = null; });
     return backendSwitchPromise;
   };
-  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config, writerLifecycle);
+  if (typeof bridge.on === 'function') wireBridge(bridge, tracker, threadActivity, hub, config, {
+    ...writerLifecycle,
+    decorateCodexMessage: (message) => chatImages.decorateProtocolMessage(message),
+  });
 
   const server = http.createServer(async (request, response) => {
     const startedAt = Date.now();
@@ -978,6 +1000,24 @@ export function createCodexMobileServer(options = {}) {
         const body = await readBody(request, config.maxBodyBytes);
         const filePath = resolveLinkedPath(body.path, body.cwd, config);
         json(response, 200, { artifact: linkedArtifact(filePath, config) });
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/chat-images') {
+        const image = await chatImages.upload(request, {
+          fileName: url.searchParams.get('name'),
+          contentType: request.headers['content-type'],
+        });
+        json(response, 201, { image });
+        return;
+      }
+      let match = routeMatch(pathname, /^\/api\/chat-images\/([^/]+)$/);
+      if ((request.method === 'GET' || request.method === 'HEAD') && match) {
+        const image = chatImages.resolveToken(match[0]);
+        streamFile(request, response, image.path, {
+          contentType: image.mimeType,
+          filename: image.name,
+          cache: 'private, max-age=3600',
+        });
         return;
       }
       if (request.method === 'GET' && pathname === '/api/skills/market') {
@@ -1148,7 +1188,7 @@ export function createCodexMobileServer(options = {}) {
         return;
       }
 
-      let match = routeMatch(pathname, /^\/api\/threads\/([^/]+)$/);
+      match = routeMatch(pathname, /^\/api\/threads\/([^/]+)$/);
       if (request.method === 'GET' && match) {
         const result = await bridge.request('thread/read', { threadId: match[0], includeTurns: false });
         if (!threadAllowed(result.thread, config)) throw new AppError('会话不在允许的项目目录中。', 403, 'THREAD_NOT_ALLOWED');
@@ -1298,7 +1338,10 @@ export function createCodexMobileServer(options = {}) {
           cursor,
         });
         const page = recovered ?? result ?? { data: [], nextCursor: null };
-        json(response, 200, { data: page.data ?? [], nextCursor: page.nextCursor ?? null });
+        json(response, 200, {
+          data: chatImages.decorateTurns(page.data ?? []),
+          nextCursor: page.nextCursor ?? null,
+        });
         return;
       }
       if (request.method === 'POST' && match) {
@@ -1317,6 +1360,7 @@ export function createCodexMobileServer(options = {}) {
             catalogs.collaborationModes = modes?.data ?? [];
           }
           const settings = turnSettings(body, cwd, catalogs, config);
+          const turnInput = userInput(body, cwd, config, chatImages);
           let activeThreadId = requestedThreadId;
           let recreated = false;
           try {
@@ -1340,7 +1384,7 @@ export function createCodexMobileServer(options = {}) {
             try {
               result = await bridge.request('turn/start', {
                 threadId: activeThreadId,
-                input: userInput(body, cwd, config),
+                input: turnInput,
                 cwd,
                 runtimeWorkspaceRoots: [cwd],
                 ...settings,
@@ -1363,7 +1407,7 @@ export function createCodexMobileServer(options = {}) {
               tracker.begin(activeThreadId, cwd);
               result = await bridge.request('turn/start', {
                 threadId: activeThreadId,
-                input: userInput(body, cwd, config),
+                input: turnInput,
                 cwd,
                 runtimeWorkspaceRoots: [cwd],
                 ...settings,
@@ -1371,10 +1415,12 @@ export function createCodexMobileServer(options = {}) {
               recreated = true;
             }
             activeWriterTurns.add(activeThreadId);
+            chatImages.markReferenced(turnInput);
             tracker.bindTurn(activeThreadId, result.turn.id);
             const activity = threadActivity.start(activeThreadId, result.turn.id, body.mode ?? 'default');
             json(response, 201, {
               ...result,
+              turn: chatImages.decorateTurn(result.turn),
               thread: { id: activeThreadId, cwd, activity },
               recreated,
             });
@@ -1394,12 +1440,17 @@ export function createCodexMobileServer(options = {}) {
       if (request.method === 'POST' && match) {
         const body = await readBody(request, config.maxBodyBytes);
         const cwd = validateProject(body.cwd, config);
+        const turnInput = userInput(body, cwd, config, chatImages);
         const result = await bridge.request('turn/steer', {
           threadId: match[0],
           expectedTurnId: String(body.turnId),
-          input: userInput(body, cwd, config),
+          input: turnInput,
         });
-        json(response, 200, result);
+        chatImages.markReferenced(turnInput);
+        json(response, 200, {
+          ...result,
+          ...(result?.turn ? { turn: chatImages.decorateTurn(result.turn) } : {}),
+        });
         return;
       }
       match = routeMatch(pathname, /^\/api\/threads\/([^/]+)\/turns\/([^/]+)\/interrupt$/);
@@ -1603,7 +1654,7 @@ export function createCodexMobileServer(options = {}) {
 
   return {
     server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity,
-    conversationArtifacts, backendManager, handoffFiles,
+    conversationArtifacts, backendManager, handoffFiles, chatImages,
   };
 }
 

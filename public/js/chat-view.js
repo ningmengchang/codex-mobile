@@ -23,6 +23,7 @@ import {
   turnArtifactsHtml,
   itemHtml,
   itemInnerHtml,
+  itemContentKey,
   isToolItem,
   turnSectionHtml,
 } from './chat-core.js';
@@ -285,6 +286,12 @@ export function updateTimelineItem(turnId, item) {
   const selector = `#timeline [data-turn-id="${escapeAttribute(turnId)}"][data-item-id="${escapeAttribute(item.id)}"]`;
   let node = document.querySelector(selector);
   if (!node && item.type === 'userMessage') {
+    const key = itemContentKey(item);
+    if (key) {
+      node = document.querySelector(`#timeline [data-turn-id="${escapeAttribute(turnId)}"][data-content-key="${escapeAttribute(key)}"]`);
+    }
+  }
+  if (!node && item.type === 'userMessage') {
     const text = (item.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
     const existing = [...document.querySelectorAll(`#timeline [data-turn-id="${escapeAttribute(turnId)}"].message.user`)].find((element) => {
       const copy = element.querySelector('.copy-question');
@@ -328,6 +335,8 @@ export function updateTimelineItem(turnId, item) {
   if (inner !== null) {
     node.innerHTML = inner;
     node.dataset.itemId = item.id;
+    const contentKey = itemContentKey(item);
+    if (contentKey) node.dataset.contentKey = contentKey;
   } else {
     node.outerHTML = itemHtml(item, turnId);
   }

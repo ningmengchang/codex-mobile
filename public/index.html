@@ -15,7 +15,7 @@
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=88">
+  <link rel="stylesheet" href="/styles.css?v=89">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -80,13 +80,23 @@
         </button>
         <form id="composer" class="composer">
           <div id="mentionTray" class="mention-tray"></div>
+          <div id="imageTray" class="image-tray" aria-label="待发送图片" hidden></div>
+          <input id="imageGalleryInput" class="visually-hidden" type="file" accept="image/*" multiple tabindex="-1">
+          <input id="imageCameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" tabindex="-1">
           <textarea id="promptInput" rows="1" enterkeyhint="send" autocapitalize="sentences" placeholder="告诉 Codex 下一步做什么…"></textarea>
+          <div id="imageSourcePopover" class="image-source-popover" role="menu" hidden>
+            <button id="takePhotoButton" type="button" role="menuitem"><span aria-hidden="true">◎</span>拍照</button>
+            <button id="chooseGalleryImageButton" type="button" role="menuitem"><span aria-hidden="true">▧</span>从相册选择</button>
+          </div>
           <div class="composer-footer">
             <span class="composer-meta">
               <span id="connectionStatus" class="connection-pill" data-state="connecting" title="连接状态"><i></i><span>连接中</span></span>
               <span id="currentProjectName" class="composer-project">选择项目</span>
             </span>
             <div class="composer-actions">
+              <button id="imageButton" type="button" class="image-button" aria-label="添加图片" title="添加图片">
+                <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3" width="13" height="12" rx="2"/><circle cx="6.25" cy="6.75" r="1.25"/><path d="m4.5 13 3.2-3.2 2.1 2 1.5-1.5 2.2 2.7"/></svg>
+              </button>
               <button id="skillButton" type="button" class="skill-button" aria-label="技能" title="技能">⌘</button>
               <button id="interruptButton" type="button" class="stop-button" hidden><i></i>停止</button>
               <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="Codex 工作模式">
@@ -336,7 +346,12 @@
     </div>
   </dialog>
 
+  <dialog id="chatImagePreviewDialog" class="chat-image-preview-dialog" aria-labelledby="chatImagePreviewTitle">
+    <header><strong id="chatImagePreviewTitle">图片预览</strong><button id="closeChatImagePreview" class="icon-button" type="button" aria-label="关闭图片预览">×</button></header>
+    <div><img id="chatImagePreview" alt="图片预览"></div>
+  </dialog>
+
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=114"></script>
+  <script type="module" src="/app.js?v=115"></script>
 </body>
 </html>

@@ -104,6 +104,17 @@ export function loadConfig(overrides = {}) {
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_FILE_BYTES, 512 * 1024 * 1024),
     maxBodyBytes: overrides.maxBodyBytes
       ?? positiveInteger(process.env.CODEX_MOBILE_MAX_BODY_BYTES, 2 * 1024 * 1024),
+    chatImageDir: overrides.chatImageDir
+      ?? process.env.CODEX_MOBILE_CHAT_IMAGE_DIR
+      ?? path.join(dataDir, 'chat-images'),
+    maxInputImageBytes: overrides.maxInputImageBytes
+      ?? positiveInteger(process.env.CODEX_MOBILE_MAX_INPUT_IMAGE_BYTES, 8 * 1024 * 1024),
+    maxInputImages: overrides.maxInputImages
+      ?? positiveInteger(process.env.CODEX_MOBILE_MAX_INPUT_IMAGES, 4),
+    chatImageTokenTtlSeconds: overrides.chatImageTokenTtlSeconds
+      ?? positiveInteger(process.env.CODEX_MOBILE_CHAT_IMAGE_TOKEN_TTL_SECONDS, 24 * 60 * 60),
+    chatImagePendingTtlSeconds: overrides.chatImagePendingTtlSeconds
+      ?? positiveInteger(process.env.CODEX_MOBILE_CHAT_IMAGE_PENDING_TTL_SECONDS, 24 * 60 * 60),
     handoffMaxBytes: overrides.handoffMaxBytes
       ?? positiveInteger(process.env.CODEX_MOBILE_HANDOFF_MAX_BYTES, 5 * 1024 * 1024),
     handoffRecentTurns: overrides.handoffRecentTurns

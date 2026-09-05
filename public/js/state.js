@@ -62,6 +62,7 @@ export const state = {
   threadOpenedAt: null,
   questionCursor: 0,
   selectedMentions: [],
+  selectedImages: [],
   currentArtifact: null,
   threadAction: null,
   threadCopy: null,
