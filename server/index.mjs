@@ -24,6 +24,8 @@ import { readWorkbook, readWorksheet } from './spreadsheet.mjs';
 import { createThreadActivityStore } from './thread-activity.mjs';
 import { receiveUpload } from './uploads.mjs';
 import { createProjectEntry, deleteProjectEntry } from './project-files.mjs';
+import { createTerminalManager } from './terminal.mjs';
+import { createTerminalWorkflows } from './terminal-workflows.mjs';
 import {
   AppError,
   assertAllowedPath,
@@ -36,6 +38,12 @@ import {
 const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PUBLIC_ROOT = path.join(PROJECT_ROOT, 'public');
 const STATIC_FILES = new Map([
+  ['/js/terminal.js', ['js/terminal.js', 'text/javascript; charset=utf-8']],
+  ['/js/terminal-utils.js', ['js/terminal-utils.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/xterm.js', ['vendor/xterm.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/xterm-addon-fit.js', ['vendor/xterm-addon-fit.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/xterm.css', ['vendor/xterm.css', 'text/css; charset=utf-8']],
+  ['/terminal.css', ['terminal.css', 'text/css; charset=utf-8']],
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
@@ -542,6 +550,8 @@ export function createCodexMobileServer(options = {}) {
   const skillMarket = options.skillMarket ?? createSkillMarket(config);
   const rolloutHistory = options.rolloutHistory ?? createRolloutHistory(config);
   const chatImages = options.chatImages ?? createChatImageStore(config);
+  const terminals = createTerminalManager(config);
+  const terminalWorkflows = createTerminalWorkflows(config);
   const conversationArtifacts = options.conversationArtifacts ?? createConversationArtifacts(config, {
     onReady: ({ threadId }) => hub.publish('artifact-history-ready', { threadId }),
     onError: ({ threadId, error }) => hub.publish('artifact-error', { threadId, message: error.message }),
@@ -950,8 +960,49 @@ export function createCodexMobileServer(options = {}) {
         return;
       }
 
-      requireSession(request, config);
+      const sessionClaims = requireSession(request, config);
       if (!['GET', 'HEAD'].includes(request.method)) assertSameOrigin(request);
+
+      if (pathname.startsWith('/api/terminal')) {
+        assertSameOrigin(request);
+        if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError('拒绝跨站终端请求。', 403);
+        const owner = sessionClaims.sid;
+        const backend = backendManager.activeId();
+        if (pathname === '/api/terminal/workflows' && request.method === 'GET') {
+          json(response, 200, { data: terminalWorkflows.list() }); return;
+        }
+        if (pathname === '/api/terminal/workflows' && request.method === 'POST') {
+          json(response, 200, terminalWorkflows.save(await readBody(request, 8192))); return;
+        }
+        const workflow = routeMatch(pathname, /^\/api\/terminal\/workflows\/([a-f0-9-]+)$/);
+        if (workflow && request.method === 'DELETE') {
+          json(response, 200, terminalWorkflows.remove(workflow[0])); return;
+        }
+        if (pathname === '/api/terminals' && request.method === 'POST') {
+          const body = await readBody(request, 4096);
+          if (body.backend !== backend) throw new AppError('Agent 已切换，请重新打开终端。', 409);
+          if (typeof body.threadId !== 'string' || !body.threadId || body.threadId.length > 160) throw new AppError('缺少会话。');
+          const result = await bridge.request('thread/read', { threadId: body.threadId, includeTurns: false });
+          if (!threadAllowed(result.thread, config)) throw new AppError('会话目录不允许访问。', 403);
+          if (backendManager.activeId() !== backend) throw new AppError('Agent 已切换，请重试。', 409);
+          json(response, 200, await terminals.create({ owner, backend, threadId: body.threadId,
+            cwd: result.thread.cwd, acknowledged: body.acknowledged })); return;
+        }
+        const terminal = /^\/api\/terminals\/([a-f0-9-]+)(?:\/(input|resize))?$/.exec(pathname)?.slice(1);
+        if (terminal) {
+          if (request.method === 'GET' && !terminal[1]) {
+            json(response, 200, terminals.read(terminal[0], owner, backend, Number(url.searchParams.get('cursor') ?? 0))); return;
+          }
+          if (request.method === 'DELETE' && !terminal[1]) {
+            json(response, 200, terminals.remove(terminal[0], owner, backend)); return;
+          }
+          if (request.method === 'POST' && ['input', 'resize'].includes(terminal[1])) {
+            const body = await readBody(request, 100_000);
+            json(response, 200, terminals[terminal[1]](terminal[0], owner, backend, body)); return;
+          }
+        }
+        throw new AppError('终端接口不存在。', 404);
+      }
 
       if (request.method === 'GET' && pathname === '/api/runtime/backends') {
         json(response, 200, backendManager.payload());
@@ -1652,9 +1703,10 @@ export function createCodexMobileServer(options = {}) {
     }
   });
 
+  server.on('close', () => terminals.close());
   return {
     server, config, bridge, tracker, hub, dingtalk, skillMarket, threadActivity,
-    conversationArtifacts, backendManager, handoffFiles, chatImages,
+    conversationArtifacts, backendManager, handoffFiles, chatImages, terminals,
   };
 }
 
@@ -1667,6 +1719,7 @@ if (isMain) {
     app.bridge.start().catch((error) => log(app.config, 'error', 'unable to start app-server', error.stack ?? error.message));
   });
   const shutdown = async () => {
+    app.terminals.close();
     await app.tracker.finishAll();
     app.hub.close();
     await app.bridge.stop();

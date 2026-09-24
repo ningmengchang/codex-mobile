@@ -51,14 +51,61 @@ export function loadConfig(overrides = {}) {
   const defaultEffort = overrides.defaultEffort
     ?? process.env.CODEX_MOBILE_DEFAULT_EFFORT
     ?? 'max';
+  // 主实例的技能目录：所有 Agent 共享，保证每个实例都能用到同一批技能。
+  const sharedSkillsRoot = '/home/ningmengchang/.codex/skills';
   const skillsRoots = overrides.skillsRoots
     ?? (process.env.CODEX_MOBILE_SKILLS_ROOTS
       ? process.env.CODEX_MOBILE_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
-      : ['/home/ningmengchang/.codex/skills', '/home/ningmengchang/.agents/skills']);
+      : [sharedSkillsRoot, '/home/ningmengchang/.agents/skills']);
   const deepseekHome = process.env.CODEX_MOBILE_DEEPSEEK_HOME ?? '/home/ningmengchang/.codex-ds';
   const deepseekSkillsRoots = process.env.CODEX_MOBILE_DEEPSEEK_SKILLS_ROOTS
     ? process.env.CODEX_MOBILE_DEEPSEEK_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
     : [path.join(deepseekHome, 'skills'), '/home/ningmengchang/.agents/skills'];
+  const glmHome = process.env.CODEX_MOBILE_GLM_HOME ?? '/home/ningmengchang/.codex-glm';
+  const glmSkillsRoots = process.env.CODEX_MOBILE_GLM_SKILLS_ROOTS
+    ? process.env.CODEX_MOBILE_GLM_SKILLS_ROOTS.split(path.delimiter).filter(Boolean)
+    : [path.join(glmHome, 'skills'), sharedSkillsRoot, '/home/ningmengchang/.agents/skills'];
+  // 额外的设备码登录实例：各自独立 CODEX_HOME，各自 codex login --device-auth。
+  // 未登录（缺少 auth.json）时由 CodexBackendManager 实时置灰，不会误切。
+  const deviceAccountBackends = [
+    {
+      id: 'codex1',
+      label: 'Codex1',
+      description: '设备码登录 · 备用账号 1',
+      home: process.env.CODEX_MOBILE_CODEX1_HOME ?? '/home/ningmengchang/.codex1',
+      skillsEnv: 'CODEX_MOBILE_CODEX1_SKILLS_ROOTS',
+    },
+    {
+      id: 'codex2',
+      label: 'Codex2',
+      description: '设备码登录 · 备用账号 2',
+      home: process.env.CODEX_MOBILE_CODEX2_HOME ?? '/home/ningmengchang/.codex2',
+      skillsEnv: 'CODEX_MOBILE_CODEX2_SKILLS_ROOTS',
+    },
+    {
+      id: 'codex3',
+      label: 'Codex3',
+      description: '设备码登录 · 备用账号 3',
+      home: process.env.CODEX_MOBILE_CODEX3_HOME ?? '/home/ningmengchang/.codex3',
+      skillsEnv: 'CODEX_MOBILE_CODEX3_SKILLS_ROOTS',
+    },
+  ].map((account) => {
+    const skillsOverride = process.env[account.skillsEnv];
+    return {
+      id: account.id,
+      label: account.label,
+      description: account.description,
+      codexBin,
+      codexHome: account.home,
+      appServerArgs,
+      defaultModel,
+      defaultEffort,
+      skillsRoots: skillsOverride
+        ? skillsOverride.split(path.delimiter).filter(Boolean)
+        : [path.join(account.home, 'skills'), sharedSkillsRoot, '/home/ningmengchang/.agents/skills'],
+      authFile: path.join(account.home, 'auth.json'),
+    };
+  });
   const codexBackends = overrides.codexBackends ?? [
     {
       id: 'gpt',
@@ -82,6 +129,20 @@ export function loadConfig(overrides = {}) {
       defaultEffort: process.env.CODEX_MOBILE_DEEPSEEK_EFFORT ?? 'high',
       skillsRoots: deepseekSkillsRoots,
     },
+    {
+      id: 'glm',
+      label: 'GLM',
+      description: '智谱 Coding Plan · 独立本地配置',
+      codexBin: process.env.CODEX_MOBILE_GLM_BIN ?? '/home/ningmengchang/.local/bin/codex-glm',
+      codexHome: glmHome,
+      appServerArgs,
+      defaultModel: process.env.CODEX_MOBILE_GLM_MODEL ?? 'glm-5.3-flash',
+      defaultEffort: process.env.CODEX_MOBILE_GLM_EFFORT ?? 'max',
+      skillsRoots: glmSkillsRoots,
+      keyFile: path.join(glmHome, 'key.env'),
+      keyName: 'ZHIPU_API_KEY',
+    },
+    ...deviceAccountBackends,
   ];
   return {
     host: overrides.host ?? process.env.CODEX_MOBILE_HOST ?? '127.0.0.1',

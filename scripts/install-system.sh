@@ -46,9 +46,15 @@ for source in "$PROJECT_DIR"/server/*.mjs; do
   install -o ningmengchang -g ningmengchang -m 0644 "$source" "$DEPLOY_DIR/server/$(basename "$source")"
 done
 install -o ningmengchang -g ningmengchang -m 0644 "$PROJECT_DIR/server/xlsx-preview.py" "$DEPLOY_DIR/server/xlsx-preview.py"
+install -o ningmengchang -g ningmengchang -m 0644 "$PROJECT_DIR/server/terminal-pty.py" "$DEPLOY_DIR/server/terminal-pty.py"
 for source in "$PROJECT_DIR"/public/*; do
+  if [ -d "$source" ]; then continue; fi
   install -o ningmengchang -g ningmengchang -m 0644 "$source" "$DEPLOY_DIR/public/$(basename "$source")"
 done
+install -d -o ningmengchang -g ningmengchang -m 0755 "$DEPLOY_DIR/public/js" "$DEPLOY_DIR/public/vendor"
+cp -a "$PROJECT_DIR/public/js/." "$DEPLOY_DIR/public/js/"
+cp -a "$PROJECT_DIR/public/vendor/." "$DEPLOY_DIR/public/vendor/"
+chown -R ningmengchang:ningmengchang "$DEPLOY_DIR/public"
 install -o ningmengchang -g ningmengchang -m 0644 "$PROJECT_DIR/package.json" "$DEPLOY_DIR/package.json"
 install -o ningmengchang -g ningmengchang -m 0755 "$PROJECT_DIR/scripts/pair.mjs" "$DEPLOY_DIR/scripts/pair.mjs"
 install -o ningmengchang -g ningmengchang -m 0755 "$PROJECT_DIR/scripts/check-protocol.mjs" "$DEPLOY_DIR/scripts/check-protocol.mjs"

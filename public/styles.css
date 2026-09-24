@@ -571,11 +571,13 @@ body.approval-open .composer { opacity: 0; pointer-events: none; }
   .session-rail { display: none; }
   .view { height: 100%; padding: 18px 14px calc(18px + var(--safe-bottom)); }
   .chat-view { padding: 0 0 calc(126px + var(--safe-bottom)); }
-  .chat-detail-header { position: sticky; top: 0; z-index: 15; min-width: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 7px; min-height: 46px; padding: max(6px, env(safe-area-inset-top)) 8px 6px; border-bottom: 1px solid var(--line); background: #0b0d10f5; backdrop-filter: blur(12px); }
-  .chat-back-button, .chat-detail-more { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
+  .chat-detail-header { position: sticky; top: 0; z-index: 15; min-width: 0; display: grid; grid-template-columns: 68px minmax(0, 1fr) 68px; align-items: center; gap: 4px; min-height: 46px; padding: max(6px, env(safe-area-inset-top)) 8px 6px; border-bottom: 1px solid var(--line); background: #0b0d10f5; backdrop-filter: blur(12px); }
+  .chat-detail-actions { display: flex; justify-content: flex-end; gap: 4px; }
+  .chat-back-button, .chat-detail-files, .chat-detail-more { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
   .chat-back-button { font-size: 28px; line-height: 1; }
+  .chat-detail-files svg { width: 17px; height: 17px; }
   .chat-detail-more { font-size: 18px; }
-  .chat-back-button:active, .chat-detail-more:active { background: var(--panel-2); transform: scale(.96); }
+  .chat-back-button:active, .chat-detail-files:active, .chat-detail-more:active { background: var(--panel-2); transform: scale(.96); }
   .chat-detail-title { min-width: 0; display: grid; justify-items: center; gap: 1px; }
   .chat-detail-title strong, .chat-detail-title small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-detail-title strong { font-size: 12px; font-weight: 700; }
@@ -855,6 +857,7 @@ html[data-theme="light"] .pair-form input {
 .skill-repo { color: var(--blue); }
 .icon-button,
 .chat-back-button,
+.chat-detail-files,
 .chat-detail-more,
 .artifact-back-button,
 .artifact-refresh-button,

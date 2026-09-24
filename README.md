@@ -1,5 +1,9 @@
 # Codex Mobile（Codex 随行）
 
+## 会话终端
+
+聊天右上角 `›_` 可直接连接或恢复会话目录下的独立终端，在终端光标处输入命令。手机端铺满可视区域；快捷键、输出转聊天草稿与结束操作位于顶部“⋯”。手动终端不经过 AI 审批；权限、生命周期与验证方式见 [会话终端说明](docs/terminal.md)。
+
 通过手机浏览器控制 Deepin PC 上的 Codex。它不依赖 tmux，而是使用 Codex 官方 App Server 协议：手机 PWA 连接本机 Node.js 网关，网关以 `root` 身份复用 `/root/.codex` 的登录和会话。
 
 ## 聊天交互规则（Chat Rules）
@@ -21,14 +25,79 @@
 - 完成和失败状态以未读方式持久化到服务数据目录，打开对应会话并加载完成后才会清除；刷新和 SSE 重连不会丢失。
 - 聊天详情继续使用最新 20 回合优先和向上分页加载，桌面端保留左侧会话栏与右侧聊天的双栏结构。
 
-## GPT / DeepSeek 手动交接
+## GPT / DeepSeek / GLM 手动交接
 
-- GPT 与 DeepSeek 继续使用各自原生的 `CODEX_HOME` 和会话，不做后台同步，也不修改任何 Codex 登录或模型配置。
+- GPT、DeepSeek 与 GLM 继续使用各自原生的 `CODEX_HOME` 和会话，不做后台同步，也不修改任何 Codex 登录或模型配置。
 - 在具体聊天右上角菜单选择“复制交接包”，服务会从本地可见历史、方案、文档索引与 Git 状态生成标准 Markdown；该过程不调用模型，在账号没有额度时也能使用。
 - 交接包会自动隐藏常见 API Key、令牌、密码与配对码，默认最多 5 MiB、优先读取完整本地历史，原生分页最多读取最近 500 个回合。
 - 生成结果以 `0600` 权限保存在 `/var/lib/codex-mobile/handoffs`，同一 Agent 的同一会话重复生成时原子覆盖，不写入项目仓库。
 - 手机只复制一条很短的本机文件读取指令。切换 Agent 后，打开或新建目标会话并粘贴该指令；目标 Agent 必须运行在同一台 Codex Mobile 服务器上。需要反向接力时重复同一流程。
 - 手机端与 CLI 只有在连接同一台机器、使用同一 Agent 的 `CODEX_HOME`、恢复同一个原生会话 ID 时才会看到相同历史；同一会话同时只允许一个 writer。
+
+## 六个 Agent：GPT / DeepSeek / GLM / Codex1 / Codex2 / Codex3
+
+手机端设置里的 `Agent` 下拉可在多套彼此隔离的 Codex 实例之间切换。切换只会换 `CODEX_HOME` 并重启 App Server，不复制会话、不改动任何登录信息；会话有任务在跑时会先提示，确认后才强制中断，失败会自动回滚到切换前的 Agent。
+
+| Agent | 启动入口 | `CODEX_HOME` | 认证方式 | 默认模型 |
+| --- | --- | --- | --- | --- |
+| GPT | `/opt/codex-mobile/bin/codex` | `/home/ningmengchang/.codex` | 设备码登录 | `gpt-5.6-sol` |
+| DeepSeek | `/home/ningmengchang/.local/bin/codex-ds` | `/home/ningmengchang/.codex-ds` | `key.env` 的 `DEEPSEEK_API_KEY` | `deepseek-v4-flash` |
+| GLM | `/home/ningmengchang/.local/bin/codex-glm` | `/home/ningmengchang/.codex-glm` | `key.env` 的 `ZHIPU_API_KEY` | `glm-5.3-flash` |
+| Codex1 | `/home/ningmengchang/.local/bin/codex1` | `/home/ningmengchang/.codex1` | 设备码登录（备用账号） | 同 GPT |
+| Codex2 | `/home/ningmengchang/.local/bin/codex2` | `/home/ningmengchang/.codex2` | 设备码登录（备用账号） | 同 GPT |
+| Codex3 | `/home/ningmengchang/.local/bin/codex3` | `/home/ningmengchang/.codex3` | 设备码登录（备用账号） | 同 GPT |
+
+`Codex1` / `Codex2` / `Codex3` 是给"主号额度用尽后换号继续"准备的备用设备码实例，与主号（GPT）、DeepSeek、GLM 完全隔离：各自 `CODEX_HOME`、各自 `auth.json`、各自会话历史。三个实例的 `skills/` 都用符号链接指向主实例的 `~/.codex/skills`，并叠加共享的 `~/.agents/skills`，因此技能与主号一致，以后新增技能也会自动跟随。
+
+### 绑定设备码（每个账号一次）
+
+```bash
+codex1 login --device-auth     # 按提示打开链接、填入设备码，用账号 1 完成登录
+codex1 login status            # 期望输出：Logged in using ChatGPT
+codex1 exec --skip-git-repo-check "只回复 pong"   # 真实跑一次确认
+
+codex2 login --device-auth     # 账号 2 同理
+```
+
+登录只写入 `~/.codex1/auth.json`（或 `~/.codex2/auth.json`）。两个启动脚本内置护栏：`CODEX_HOME` 解析结果必须是各自的实例目录，否则直接报错退出，避免误操作覆盖主号、DeepSeek 或 GLM 的登录信息。
+
+未登录时手机端会把对应 Agent 置灰并显示"（未登录）"；补完 key 的 GLM 显示"（未配置）"。可用性是实时判断的，**登录完成后刷新页面即可切换，不需要改代码或重启服务**。登录后下拉会显示 `Codex1 · 账号邮箱`，便于区分是哪个号。
+
+### 额度用尽后怎么继续
+
+1. 在原账号的会话右上角 `⋯` → 复制交接包。
+2. 切换到另一个设备码 Agent（例如 Codex1）。
+3. 新建或打开目标会话，粘贴那条读取指令，让新账号接着处理。
+
+交接包按 `codex-handoff-<agent>-<hash>.md` 保存，不同账号互不覆盖；每个 Agent 的模型、强度、上次会话、草稿与收藏也各自独立。
+
+### 再加一个账号
+
+以 Codex3 为模板，新增一个 `codexN` 只需三步：
+
+1. 建目录与配置：`mkdir -p ~/.codexN/skills`，把 `~/.codex/config.toml` 复制成 `~/.codexN/config.toml`（`chmod 600`），再把 `~/.codex/skills/*` 逐个 `ln -s` 进 `~/.codexN/skills`。
+2. 复制启动脚本：`cp ~/.local/bin/codex3 ~/.local/bin/codexN`，把里面的 `codex3` / `.codex3` 全部改成 `codexN` / `.codexN`，保持 `chmod 755`。
+3. 注册到网关：在 `server/config.mjs` 的 `deviceAccountBackends` 里加一条同构配置（id / label / description / home / skillsEnv），`npm run verify` 后执行 `sudo ./scripts/install-system.sh` 并重启服务。
+
+登录仍然是 `codexN login --device-auth`；未登录时该 Agent 在手机端显示"（未登录）"并置灰。
+
+GLM 实例按智谱 Coding Plan 官方文档接入 OpenAI Responses 协议：
+
+- `config.toml` 使用 `model_provider = "ZAI"`、`base_url = "https://open.bigmodel.cn/api/v1"`、`wire_api = "responses"`，`model_catalog_json` 指向实例内的 `models.json`（声明 `glm-5.3` 与 `glm-5-turbo`）。
+- 套餐可用模型共三个：`glm-5.3`（旗舰）、`glm-5.3-flash`（快速多模态，当前默认）、`glm-5-turbo`（Agent 优化）。默认模型可用 `CODEX_MOBILE_GLM_MODEL` 覆盖；手机端也可在“模型”下拉里对各 Agent 单独选择，选择结果保存在浏览器本地。
+- API Key 只保存在 `~/.codex-glm/key.env`（权限 `0600`），由启动脚本导出为 `ZHIPU_API_KEY`，Codex 通过 provider 的 `env_key` 读取；Key 不写入 `config.toml`，也不进入版本库。
+- 未填写 Key 时 GLM 在手机端自动置灰，避免切过去之后停在“Codex 启动中”。
+- 自检与真实请求校验：`codex-glm --version`、`codex-glm exec --skip-git-repo-check "只回复 pong"`。
+- 若该端点忽略 `env_key`，在 `[model_providers.ZAI]` 段补 `experimental_bearer_token = "<API Key>"`（文件保持 `0600`）后重试。
+
+命令行使用同一实例，历史与手机端一致：
+
+```bash
+codex-glm
+codex-glm exec "只回复 pong"
+```
+
+三个 Agent 的模型、推理强度、上次打开的会话、草稿与收藏都在手机端按 Agent 分别保存，来回切换不会互相覆盖。
 
 ## 能力
 
@@ -126,6 +195,10 @@ CODEX_MOBILE_MAX_FILE_BYTES=536870912
 CODEX_MOBILE_LOG_LEVEL=info
 CODEX_MOBILE_DEFAULT_MODEL=gpt-5.6-sol
 CODEX_MOBILE_DEFAULT_EFFORT=max
+CODEX_MOBILE_GLM_BIN=/home/ningmengchang/.local/bin/codex-glm
+CODEX_MOBILE_GLM_HOME=/home/ningmengchang/.codex-glm
+CODEX_MOBILE_GLM_MODEL=glm-5.3
+CODEX_MOBILE_GLM_EFFORT=max
 CODEX_MOBILE_HANDOFF_MAX_BYTES=5242880
 CODEX_MOBILE_HANDOFF_RECENT_TURNS=500
 ```

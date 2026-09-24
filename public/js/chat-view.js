@@ -112,14 +112,14 @@ export function renderModeControls() {
     button.setAttribute('aria-checked', String(active));
     button.disabled = Boolean(state.activeTurnId);
   }
-  $('#modelSelect').disabled = Boolean(state.activeTurnId);
+  $('#modelSelect').disabled = Boolean(state.activeTurnId) || state.backendSwitching;
   const backendSelect = $('#backendSelect');
   if (backendSelect) {
     const availableBackends = state.bootstrap?.backends?.data?.filter((item) => item.available).length ?? 0;
     backendSelect.disabled = state.backendSwitching || availableBackends < 2;
   }
-  $('#effortSelect').disabled = Boolean(state.activeTurnId);
-  $('#approvalReviewerSelect').disabled = Boolean(state.activeTurnId);
+  $('#effortSelect').disabled = Boolean(state.activeTurnId) || state.backendSwitching;
+  $('#approvalReviewerSelect').disabled = Boolean(state.activeTurnId) || state.backendSwitching;
   $('#approvalReviewerSelect').value = state.approvalsReviewer;
   const effortOptions = [...$('#effortSelect').options].map((option) => option.value);
   $('#effortSelect').value = state.effort && effortOptions.includes(state.effort)

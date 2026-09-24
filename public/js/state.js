@@ -18,6 +18,7 @@ export const MAIN_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', '
 export const state = {
   bootstrap: null,
   projectBrowser: null,
+  fileBrowserContext: null,
   currentProject: localStorage.getItem('codex-mobile-project') || null,
   threads: [],
   threadsNextCursor: null,

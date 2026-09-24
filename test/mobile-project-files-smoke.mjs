@@ -77,6 +77,7 @@ try {
     if (pathname === '/api/auth/status') return fulfillJson({ authenticated: true });
     if (pathname === '/api/bootstrap') return fulfillJson(bootstrap);
     if (pathname === '/api/requests') return fulfillJson({ data: [] });
+    if (pathname === '/api/favorites') return fulfillJson({ data: [] });
     if (pathname === '/api/projects') {
       projectRequests.push(url.searchParams.get('path'));
       if (url.searchParams.get('path') === '/proj/session/docs') {
@@ -188,6 +189,51 @@ try {
   await page.locator('#app:not([hidden])').waitFor({ timeout: 15_000 });
   await page.locator('#mobileThreadList .thread-item', { hasText: '当前工作会话' }).click();
   await page.locator('#chatView.active').waitFor();
+  await page.locator('#promptInput').fill('返回后保留这段草稿');
+  const chatFileEntryLayout = await page.evaluate(() => {
+    const header = document.querySelector('#chatDetailHeader').getBoundingClientRect();
+    const files = document.querySelector('#chatFilesButton').getBoundingClientRect();
+    const more = document.querySelector('#chatThreadMoreButton').getBoundingClientRect();
+    return {
+      headerHeight: Math.round(header.height),
+      filesWidth: Math.round(files.width),
+      filesHeight: Math.round(files.height),
+      moreVisible: more.width > 0 && more.height > 0,
+    };
+  });
+  if (chatFileEntryLayout.headerHeight > 54 || chatFileEntryLayout.filesWidth > 32
+    || chatFileEntryLayout.filesHeight > 32 || !chatFileEntryLayout.moreVisible) {
+    throw new Error(`聊天页文件入口挤占头部空间：${JSON.stringify(chatFileEntryLayout)}`);
+  }
+  await page.screenshot({ path: '/tmp/codex-mobile-chat-file-entry.png', fullPage: true });
+  await page.locator('#chatFilesButton').click();
+  await page.locator('#projectsView.active').waitFor();
+  await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session');
+  if (projectRequests.at(-1) !== '/proj/session') {
+    throw new Error(`聊天页文件入口未锚定会话目录：${JSON.stringify(projectRequests)}`);
+  }
+  await page.locator('.project-button', { hasText: 'docs' }).click();
+  await page.waitForFunction(() => document.querySelector('#projectPath')?.textContent === '/proj/session/docs');
+  const preservedChat = await page.evaluate(() => ({
+    projectName: document.querySelector('#currentProjectName')?.textContent,
+    threadName: document.querySelector('#chatDetailName')?.textContent,
+    draft: document.querySelector('#promptInput')?.value,
+  }));
+  if (preservedChat.projectName !== 'session' || preservedChat.threadName !== '当前工作会话'
+    || preservedChat.draft !== '返回后保留这段草稿') {
+    throw new Error(`浏览子目录时当前聊天现场被修改：${JSON.stringify(preservedChat)}`);
+  }
+  await swipeLeft(page, '#projectsView');
+  await page.locator('#chatView.active').waitFor();
+  const returnedChat = await page.evaluate(() => ({
+    hash: location.hash,
+    threadName: document.querySelector('#chatDetailName')?.textContent,
+    draft: document.querySelector('#promptInput')?.value,
+  }));
+  if (returnedChat.hash !== '#chat/thread-session' || returnedChat.threadName !== '当前工作会话'
+    || returnedChat.draft !== '返回后保留这段草稿') {
+    throw new Error(`文件管理返回后没有恢复原聊天：${JSON.stringify(returnedChat)}`);
+  }
   await page.locator('#chatBackButton').click();
   await page.locator('#threadsView.active').waitFor();
   await swipeRight(page, '#threadsView');
@@ -421,7 +467,7 @@ try {
     throw new Error('新会话创建后当前目录名称未同步');
   }
 
-  process.stdout.write(`${JSON.stringify({ currentDirectoryEntryRemoved: true, browsingDirectoryCreatesThread: true, selectedDirectoryPersisted: true, directoryActions: true, createDirectory: true, createFile: true, deleteFile: true, deleteDirectory: true, longPressUpload: true, fileUpload: true, filePreview: true, fileShare: true, previewShare: true, shareFallback: true, shareButtonWidth, directoryNavigation: true, uploadPopoverPosition, directoryTypography, previewTypography })}\n`);
+  process.stdout.write(`${JSON.stringify({ chatFileEntry: true, chatDirectoryAnchored: true, chatPreservedWhileBrowsing: true, chatReturnPreserved: true, currentDirectoryEntryRemoved: true, browsingDirectoryCreatesThread: true, selectedDirectoryPersisted: true, directoryActions: true, createDirectory: true, createFile: true, deleteFile: true, deleteDirectory: true, longPressUpload: true, fileUpload: true, filePreview: true, fileShare: true, previewShare: true, shareFallback: true, shareButtonWidth, chatFileEntryLayout, directoryNavigation: true, uploadPopoverPosition, directoryTypography, previewTypography })}\n`);
 } finally {
   await browser.close();
 }

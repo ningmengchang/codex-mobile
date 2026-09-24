@@ -11,6 +11,7 @@
     "protocol:check": "node scripts/check-protocol.mjs",
     "check": "node --check server/index.mjs && node --check server/chat-images.mjs && node --check server/codex-backends.mjs && node --check server/conversation-artifacts.mjs && node --check server/dingtalk.mjs && node --check server/favorites.mjs && node --check server/handoff-files.mjs && node --check server/handoff-package.mjs && node --check server/thread-activity.mjs && node --check server/project-files.mjs && node --check server/uploads.mjs && node --check public/app.js && node --check public/js/*.js && node --check scripts/pair.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "test:terminal": "node --test test/terminal.test.mjs && node test/mobile-terminal-smoke.mjs",
     "verify": "npm run check && npm test"
   },
   "engines": {

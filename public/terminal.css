@@ -1,0 +1,65 @@
+/* Full-viewport terminal; reuse the app's existing visual tokens. */
+#terminalDialog {
+  position: fixed; inset: auto; top: var(--terminal-top, 0px); left: var(--terminal-left, 0px);
+  width: var(--terminal-width, 100vw); height: var(--terminal-height, 100dvh);
+  max-width: none; max-height: none; margin: 0; padding: 0;
+  overflow: hidden; border: 0; border-radius: 0; color: var(--text); background: var(--panel);
+  overscroll-behavior: contain;
+}
+#terminalDialog::backdrop { background: var(--panel); }
+.chat-view .chat-detail-header { grid-template-columns: 36px minmax(0, 1fr) 108px; }
+.chat-view .chat-detail-actions { gap: 3px; }
+.chat-view .chat-detail-actions > button { width: 32px; min-width: 32px; }
+@media (min-width: 781px) {
+  .chat-view .chat-detail-header:not([hidden]) { display: grid; align-items: center; gap: 8px; padding: 6px 12px; }
+}
+#terminalDialog[open] { display: flex; flex-direction: column; }
+#terminalDialog header {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  min-height: 44px; padding: env(safe-area-inset-top, 0px) max(6px, env(safe-area-inset-right, 0px)) 0 max(4px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--line);
+}
+.terminal-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.terminal-heading strong { font-size: 13px; font-weight: 600; flex: 0 0 auto; }
+#terminalPath { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#terminalStatus { flex: 0 0 auto; font-size: 10px; color: var(--muted); }
+#terminalDialog button, #terminalMenu > summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 34px; min-height: 36px; padding: 4px 7px; border: 0; border-radius: 6px;
+  color: var(--text); background: transparent; font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+#terminalDialog button:hover, #terminalMenu > summary:hover { background: var(--panel-2); }
+#terminalDialog button:active, #terminalMenu > summary:active { background: var(--surface-overlay); }
+#terminalDialog button:focus-visible, #terminalMenu > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#terminalDialog button:disabled { opacity: .4; cursor: default; }
+#terminalDialog #terminalClose { font-size: 27px; line-height: 1; }
+#terminalMenu { position: relative; flex: 0 0 auto; }
+#terminalMenu > summary { list-style: none; font-size: 23px; line-height: 1; }
+#terminalMenu > summary::-webkit-details-marker { display: none; }
+.terminal-menu-items {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 1; width: 160px;
+  padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  box-shadow: var(--shadow-sheet);
+}
+#terminalDialog .terminal-menu-items button { display: flex; width: 100%; justify-content: flex-start; padding: 7px 10px; font-size: 12px; }
+#terminalDialog .danger { color: var(--danger, #e58282); }
+.terminal-surface { position: relative; isolation: isolate; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+#terminalScreen { position: absolute; inset: 4px max(4px, env(safe-area-inset-right, 0px)) max(4px, env(safe-area-inset-bottom, 0px)) max(4px, env(safe-area-inset-left, 0px)); overflow: hidden; touch-action: pinch-zoom; overscroll-behavior: contain; }
+#terminalScreen .xterm { height: 100%; }
+#terminalScreen .xterm-scrollable-element { overscroll-behavior: contain; background: var(--panel); }
+#terminalPlaceholder { position: absolute; inset: 0; display: grid; place-content: center; color: var(--muted); font-size: 12px; }
+.terminal-keys { display: flex; gap: 3px; padding: 2px 6px; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid var(--line); }
+#terminalDialog .terminal-keys button { flex: 1 0 auto; min-height: 32px; font-family: var(--font-mono); }
+#terminalNotice { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; padding: 5px 10px; background: var(--panel-2); }
+#terminalNoticeText { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+#terminalDialog #terminalConnect { color: var(--accent); }
+#terminalAiDialog, #terminalConfirm { width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - var(--kb-inset, 0px) - 24px); padding: 12px; }
+#terminalAiDialog header, #terminalConfirm header { padding: 0 0 8px; font-size: 13px; }
+#terminalAiDialog p, #terminalConfirmText { font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+#terminalAiText { width: 100%; height: min(42dvh, 360px); background: var(--surface-inset); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 12px/1.5 var(--font-mono); resize: vertical; }
+#terminalAiDialog button, #terminalConfirm button { font-size: 12px; padding: 6px 12px; min-height: 32px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; }
+#terminalAiAction { font-size: 13px; padding: 6px; margin: 8px 0; }
+@media (orientation: landscape) and (max-height: 500px) {
+  #terminalDialog header { min-height: 38px; }
+  #terminalDialog button, #terminalMenu > summary { min-height: 32px; }
+}

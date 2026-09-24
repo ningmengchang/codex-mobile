@@ -214,6 +214,26 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
         appServerArgs: ['app-server', '--stdio'], defaultModel: 'deepseek-v4-flash', defaultEffort: 'high',
         skillsRoots: [skillsRoot],
       },
+      {
+        id: 'glm', label: 'GLM', available: true, codexBin: '/bin/true', codexHome: path.join(directory, '.codex-glm'),
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'glm-5.3', defaultEffort: 'max',
+        skillsRoots: [skillsRoot],
+      },
+      {
+        id: 'codex1', label: 'Codex1', available: true, codexBin: '/bin/true', codexHome: path.join(directory, '.codex1'),
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'pinned-model', defaultEffort: 'max',
+        skillsRoots: [skillsRoot],
+      },
+      {
+        id: 'codex2', label: 'Codex2', available: true, codexBin: '/bin/true', codexHome: path.join(directory, '.codex2'),
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'pinned-model', defaultEffort: 'max',
+        skillsRoots: [skillsRoot],
+      },
+      {
+        id: 'codex3', label: 'Codex3', available: true, codexBin: '/bin/true', codexHome: path.join(directory, '.codex3'),
+        appServerArgs: ['app-server', '--stdio'], defaultModel: 'pinned-model', defaultEffort: 'max',
+        skillsRoots: [skillsRoot],
+      },
     ],
   };
   const rendered = [];
@@ -323,7 +343,7 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(payload.defaultEffort, 'max');
     assert.deepEqual(payload.favorites, []);
     assert.equal(payload.backends.active, 'gpt');
-    assert.deepEqual(payload.backends.data.map((item) => item.id), ['gpt', 'deepseek']);
+    assert.deepEqual(payload.backends.data.map((item) => item.id), ['gpt', 'deepseek', 'glm', 'codex1', 'codex2', 'codex3']);
     assert.equal(typeof payload.catalogsReady, 'boolean');
     const catalogs = await fetch(`${base}/api/catalogs`, { headers: { Cookie: cookie } });
     assert.equal(catalogs.status, 200);
@@ -991,6 +1011,26 @@ test('HTTP gateway requires pairing and exposes only allowlisted projects', asyn
     assert.equal(bridge.reconfigurations.at(-1).defaultModel, 'deepseek-v4-flash');
     const persistedBackend = JSON.parse(fs.readFileSync(path.join(dataDir, 'codex-backend.json'), 'utf8'));
     assert.equal(persistedBackend.active, 'deepseek');
+    const switchedGlm = await fetch(`${base}/api/runtime/backend`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'glm', force: true }),
+    });
+    assert.equal(switchedGlm.status, 200);
+    const switchedGlmBody = await switchedGlm.json();
+    assert.equal(switchedGlmBody.active, 'glm');
+    assert.equal(switchedGlmBody.defaultModel, 'glm-5.3');
+    assert.equal(app.config.codexHome, path.join(directory, '.codex-glm'));
+    assert.equal(bridge.reconfigurations.at(-1).defaultModel, 'glm-5.3');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'codex-backend.json'), 'utf8')).active, 'glm');
+    const switchedCodex1 = await fetch(`${base}/api/runtime/backend`, {
+      method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'codex1', force: true }),
+    });
+    assert.equal(switchedCodex1.status, 200);
+    assert.equal((await switchedCodex1.json()).active, 'codex1');
+    assert.equal(app.config.codexHome, path.join(directory, '.codex1'));
+    assert.equal(bridge.reconfigurations.at(-1).codexHome, path.join(directory, '.codex1'));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'codex-backend.json'), 'utf8')).active, 'codex1');
     const switchedBack = await fetch(`${base}/api/runtime/backend`, {
       method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: 'gpt', force: true }),

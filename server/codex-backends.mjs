@@ -15,14 +15,58 @@ function cloneRuntime(backend) {
   };
 }
 
-function isAvailable(backend) {
-  if (typeof backend.available === 'boolean') return backend.available;
+function hasKeyMaterial(keyFile, keyName) {
   try {
-    fs.accessSync(backend.codexBin, fs.constants.X_OK);
-    return fs.statSync(backend.codexHome).isDirectory();
+    const content = fs.readFileSync(keyFile, 'utf8');
+    const pattern = new RegExp(`^\\s*(?:export\\s+)?${keyName}\\s*=\\s*(\\S.*)$`, 'm');
+    return Boolean(content.match(pattern)?.[1]?.trim());
   } catch {
     return false;
   }
+}
+
+function accountFromIdToken(idToken) {
+  try {
+    const payload = String(idToken ?? '').split('.')[1];
+    if (!payload) return null;
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const email = typeof claims?.email === 'string' ? claims.email.trim() : '';
+    return email || null;
+  } catch {
+    return null;
+  }
+}
+
+function readAuthState(authFile) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+    const tokens = parsed?.tokens ?? {};
+    if (!tokens.refresh_token) return { loggedIn: false, account: null };
+    // 只读解析 id_token 里的 email，用于在手机上区分是哪个账号；解析失败不影响功能。
+    return { loggedIn: true, account: accountFromIdToken(tokens.id_token) };
+  } catch {
+    return { loggedIn: false, account: null };
+  }
+}
+
+// 每次查询都实时判定，因此新账号登录、补 key 之后无需重启网关即可生效。
+function backendState(backend, override = null) {
+  if (typeof override === 'boolean') return override ? 'ready' : 'disabled';
+  try {
+    fs.accessSync(backend.codexBin, fs.constants.X_OK);
+    if (!fs.statSync(backend.codexHome).isDirectory()) return 'missing';
+  } catch {
+    return 'missing';
+  }
+  // 设备码实例：缺少 auth.json（未登录）时置灰，避免切过去停在“Codex 启动中”。
+  if (backend.authFile && !readAuthState(backend.authFile).loggedIn) return 'login_required';
+  // 需要外部 API Key 的 Agent（例如 GLM）在 key 文件填写之前保持不可用。
+  if (backend.keyFile && backend.keyName && !hasKeyMaterial(backend.keyFile, backend.keyName)) return 'key_required';
+  return 'ready';
+}
+
+function isAvailable(backend, override = null) {
+  return backendState(backend, override) === 'ready';
 }
 
 function normalizeBackend(value, fallbackRuntime) {
@@ -38,6 +82,10 @@ function normalizeBackend(value, fallbackRuntime) {
   const skillsRoots = Array.isArray(value.skillsRoots)
     ? value.skillsRoots.map(String).filter(Boolean)
     : [...(fallbackRuntime.skillsRoots ?? [])];
+  const keyFile = String(value.keyFile ?? '').trim();
+  const keyName = String(value.keyName ?? '').trim();
+  const authFile = String(value.authFile ?? '').trim();
+  const availableOverride = typeof value.available === 'boolean' ? value.available : null;
   return {
     id,
     label: String(value.label ?? id).trim() || id,
@@ -48,7 +96,11 @@ function normalizeBackend(value, fallbackRuntime) {
     defaultModel: String(value.defaultModel ?? fallbackRuntime.defaultModel ?? '').trim() || null,
     defaultEffort: String(value.defaultEffort ?? fallbackRuntime.defaultEffort ?? '').trim() || null,
     skillsRoots,
-    available: isAvailable({ ...value, codexBin, codexHome }),
+    keyFile: keyFile || null,
+    keyName: keyName || null,
+    authFile: authFile || null,
+    availableOverride,
+    available: isAvailable({ codexBin, codexHome, keyFile, keyName, authFile }, availableOverride),
   };
 }
 
@@ -95,7 +147,16 @@ export class CodexBackendManager {
   }
 
   get(id) {
-    return this.backends.get(String(id ?? '').trim().toLowerCase()) ?? null;
+    const backend = this.backends.get(String(id ?? '').trim().toLowerCase()) ?? null;
+    // 可用性实时计算：填好 key.env 后无需重启服务即可看到并切换到该 Agent。
+    if (!backend) return null;
+    const state = backendState(backend, backend.availableOverride);
+    return {
+      ...backend,
+      state,
+      available: state === 'ready',
+      account: state === 'ready' && backend.authFile ? readAuthState(backend.authFile).account : null,
+    };
   }
 
   runtime(id) {
@@ -104,13 +165,18 @@ export class CodexBackendManager {
   }
 
   list() {
-    return [...this.backends.values()].map((backend) => ({
-      id: backend.id,
-      label: backend.label,
-      description: backend.description,
-      available: backend.available,
-      active: backend.id === this.activeBackendId,
-    }));
+    return [...this.backends.values()].map((backend) => {
+      const state = backendState(backend, backend.availableOverride);
+      return {
+        id: backend.id,
+        label: backend.label,
+        description: backend.description,
+        state,
+        available: state === 'ready',
+        account: state === 'ready' && backend.authFile ? readAuthState(backend.authFile).account : null,
+        active: backend.id === this.activeBackendId,
+      };
+    });
   }
 
   payload() {

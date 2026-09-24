@@ -6,6 +6,7 @@ import { initKeyboardInsets } from './js/keyboard.js';
 import { initFileShare, openFileShare } from './js/dingtalk.js';
 import { initSkillMarket } from './js/skill-market.js';
 import { initImageInput, modelSupportsImages } from './js/image-input.js';
+import { initTerminal } from './js/terminal.js?v=3';
 import { debug } from './js/debug.js';
 import { completedRuntimeActivity } from './js/turn-state.js';
 import {
@@ -43,6 +44,59 @@ import {
 let skillsCache = null;
 let imageInput = null;
 let composerHeightFrame = 0;
+const SETTINGS_RETURN_KEY = 'codex-mobile-settings-after-agent-switch';
+const SETTINGS_RETURN_TTL_MS = 5 * 60_000;
+
+function openSettings() {
+  const dialog = $('#settingsSheet');
+  if (!dialog.open) dialog.showModal();
+  loadAccountStatus().catch(() => {});
+}
+
+function rememberSettingsAfterAgentSwitch(backendId) {
+  const dialog = $('#settingsSheet');
+  try {
+    sessionStorage.removeItem(SETTINGS_RETURN_KEY);
+    if (!dialog.open) return;
+    sessionStorage.setItem(SETTINGS_RETURN_KEY, JSON.stringify({
+      backendId,
+      createdAt: Date.now(),
+      scrollTop: dialog.scrollTop,
+      bodyScrollTop: dialog.querySelector('.settings-body').scrollTop,
+    }));
+  } catch (error) {
+    debug.log('backend', 'settings-return-save-failed', { message: error.message });
+  }
+}
+
+function restoreSettingsAfterAgentSwitch() {
+  try {
+    const saved = sessionStorage.getItem(SETTINGS_RETURN_KEY);
+    // Consume once, including invalid/stale records: ordinary refreshes must not reopen settings.
+    sessionStorage.removeItem(SETTINGS_RETURN_KEY);
+    if (!saved) return;
+    const record = JSON.parse(saved);
+    const age = Date.now() - record?.createdAt;
+    if (record?.backendId !== activeBackendId() || !Number.isFinite(age)
+        || age < 0 || age > SETTINGS_RETURN_TTL_MS) return;
+    openSettings();
+    const dialog = $('#settingsSheet');
+    dialog.scrollTop = Math.max(0, Number(record.scrollTop) || 0);
+    dialog.querySelector('.settings-body').scrollTop = Math.max(0, Number(record.bodyScrollTop) || 0);
+  } catch (error) {
+    debug.log('backend', 'settings-return-restore-failed', { message: error.message });
+  }
+}
+
+function setBackendSwitching(target = null) {
+  state.backendSwitching = Boolean(target);
+  const status = $('#settingsBackendStatus');
+  status.hidden = !target;
+  status.textContent = target ? `正在切换到 ${target.label}，完成后将留在设置页…` : '';
+  $('#settingsSheet').setAttribute('aria-busy', String(Boolean(target)));
+  renderModeControls();
+  renderAccountStatus();
+}
 
 function applyTheme(theme, options = {}) {
   const next = theme === 'light' ? 'light' : 'dark';
@@ -334,6 +388,8 @@ async function initialize() {
     favoritesPromise.catch((error) => toast(error.message, 'error')),
     restoreUiState().catch((error) => toast(error.message, 'error')),
   ]);
+  // Open the modal before revealing the app so the home page never flashes in between.
+  restoreSettingsAfterAgentSwitch();
   showApp();
   connectEvents();
   tryAutoFullscreen();
@@ -345,7 +401,9 @@ async function loadBootstrap() {
   loadBackendPreferences();
   renderBackends();
   const activeBackend = state.bootstrap.backends?.data?.find((item) => item.id === activeBackendId());
-  const runtimeParts = [activeBackend?.label || activeBackendId(), state.bootstrap.runtime.user, 'SSH'];
+  const runtimeParts = [activeBackend?.label || activeBackendId()];
+  if (activeBackend?.account) runtimeParts.push(activeBackend.account);
+  runtimeParts.push(state.bootstrap.runtime.user, 'SSH');
   if (state.bootstrap.runtime.codexHome) runtimeParts.push(state.bootstrap.runtime.codexHome);
   $('#settingsRuntime').textContent = runtimeParts.join(' · ');
   setConnection(state.bootstrap.appServer.ready ? 'online' : 'connecting', state.bootstrap.appServer.ready ? '已连接' : 'Codex 启动中');
@@ -372,14 +430,27 @@ function renderBackends() {
   select.replaceChildren();
   const backends = state.bootstrap?.backends?.data ?? [];
   for (const backend of backends) {
-    const label = backend.description ? `${backend.label} · ${backend.description}` : backend.label;
-    const option = new Option(label, backend.id);
+    const option = new Option(backendOptionLabel(backend), backend.id);
     option.disabled = backend.available === false;
     select.add(option);
   }
   if (!backends.length) select.add(new Option('GPT', 'gpt'));
   select.value = activeBackendId();
   select.disabled = state.backendSwitching || backends.filter((item) => item.available).length < 2;
+}
+
+const BACKEND_STATE_SUFFIX = {
+  login_required: '（未登录）',
+  key_required: '（未配置）',
+  missing: '（不可用）',
+  disabled: '（不可用）',
+};
+
+function backendOptionLabel(backend) {
+  const detail = backend.account || backend.description || '';
+  const head = detail ? `${backend.label} · ${detail}` : backend.label;
+  if (backend.available !== false) return head;
+  return `${head}${BACKEND_STATE_SUFFIX[backend.state] ?? '（不可用）'}`;
 }
 
 function accountPlanLabel(status) {
@@ -423,6 +494,12 @@ function accountQuotaWindows(status) {
 }
 
 function renderAccountStatus() {
+  $('#refreshAccountStatusButton').disabled = state.accountStatusLoading || state.backendSwitching;
+  if (state.backendSwitching) {
+    $('#accountQuotaPlan').textContent = '';
+    $('#accountQuotaList').innerHTML = '<p class="account-quota-empty">Agent 切换中，完成后重新读取额度…</p>';
+    return;
+  }
   const status = state.accountStatus;
   $('#accountQuotaPlan').textContent = accountPlanLabel(status);
   const list = $('#accountQuotaList');
@@ -448,7 +525,7 @@ function renderAccountStatus() {
 }
 
 async function loadAccountStatus(options = {}) {
-  if (state.accountStatusLoading) return;
+  if (state.accountStatusLoading || state.backendSwitching) return;
   state.accountStatusLoading = true;
   $('#refreshAccountStatusButton').disabled = true;
   if (!options.silent) state.accountStatus = null;
@@ -459,7 +536,6 @@ async function loadAccountStatus(options = {}) {
     state.accountStatus = { available: false, message: error.message, backend: activeBackendId() };
   } finally {
     state.accountStatusLoading = false;
-    $('#refreshAccountStatusButton').disabled = false;
     renderAccountStatus();
   }
 }
@@ -573,10 +649,18 @@ async function browseProjects(projectPath = '') {
 }
 
 function defaultFileBrowserPath() {
-  return state.currentThread?.cwd
+  return state.fileBrowserContext?.rootPath
+    ?? state.currentThread?.cwd
     ?? state.currentProject
     ?? state.bootstrap?.projects?.current?.path
     ?? '';
+}
+
+function fileBrowserPreservesCurrentChat() {
+  const context = state.fileBrowserContext;
+  return Boolean(context?.threadId
+    && context.threadId === state.currentThread?.id
+    && context.rootPath === state.currentThread?.cwd);
 }
 
 function openDefaultFileBrowser() {
@@ -593,7 +677,9 @@ function openDefaultFileBrowser() {
 
 function renderProjects(data) {
   state.projectBrowser = data;
-  setCurrentProjectDirectory(data.current.path, { clearConversation: true });
+  if (!fileBrowserPreservesCurrentChat()) {
+    setCurrentProjectDirectory(data.current.path, { clearConversation: true });
+  }
   $('#projectPath').textContent = data.current.path;
   $('#projectPath').setAttribute('aria-label', `管理当前目录 ${data.current.path}`);
   $('#projectPath').title = '点击或长按管理当前目录';
@@ -1330,6 +1416,20 @@ function openCurrentThreadArtifacts(options = {}) {
     history: options.history ?? 'push',
     threadId: state.currentThread.id,
   });
+}
+
+function openCurrentThreadFiles() {
+  const thread = state.currentThread;
+  if (!thread?.id || !thread.cwd) {
+    toast('当前会话没有可用的文件目录', 'error');
+    return;
+  }
+  state.fileBrowserContext = {
+    source: 'chat',
+    threadId: thread.id,
+    rootPath: thread.cwd,
+  };
+  showTab('projects', { history: 'push', preserveFileBrowserContext: true });
 }
 
 function backFromArtifacts() {
@@ -3236,6 +3336,7 @@ function showTab(name, options = {}) {
     if (isCompactNavigation() && (options.history ?? 'none') === 'none') options = { ...options, history: 'replace' };
   }
   if (isCompactNavigation() && ['chat', 'artifacts'].includes(name) && !state.currentThread && !options.threadId) name = 'threads';
+  if (name !== 'projects' || !options.preserveFileBrowserContext) state.fileBrowserContext = null;
   if (name !== 'projects' && !$('#fileUploadPopover').hidden) hideFileUploadPopover();
   $$('.view').forEach((view) => view.classList.toggle('active', view.dataset.view === name));
   syncViewChrome(name, options.threadId);
@@ -3314,7 +3415,10 @@ function connectEvents() {
     if (state.backendSwitching || !data.active || data.active === activeBackendId()) return;
     showStartup('Agent 已切换，正在刷新会话…');
     state.events?.close();
-    setTimeout(() => window.location.reload(), 80);
+    setTimeout(() => {
+      rememberSettingsAfterAgentSwitch(data.active);
+      window.location.reload();
+    }, 80);
   });
   events.addEventListener('bridge-error', (event) => toast(JSON.parse(event.data).message, 'error'));
   events.addEventListener('favorites', (event) => {
@@ -3490,16 +3594,25 @@ $('#timeline').addEventListener('click', async (event) => {
   }
 });
 $('#jumpQuestionButton').addEventListener('click', jumpToLatestQuestion);
-$('#settingsButton').addEventListener('click', () => {
-  $('#settingsSheet').showModal();
-  loadAccountStatus().catch(() => {});
-});
+$('#settingsButton').addEventListener('click', openSettings);
 $('#closeSettingsButton').addEventListener('click', () => $('#settingsSheet').close());
 $('#refreshAccountStatusButton').addEventListener('click', () => loadAccountStatus().catch(() => {}));
 $('#skillButton').addEventListener('click', openSkillSheet);
 $('#closeSkillButton').addEventListener('click', () => $('#skillSheet').close());
 $('#closeThreadActionButton').addEventListener('click', closeThreadActionDialog);
 $('#chatBackButton').addEventListener('click', () => backToThreadHome());
+$('#chatFilesButton').addEventListener('click', openCurrentThreadFiles);
+const terminalUi = initTerminal({
+  getContext: () => state.currentThread ? { threadId: state.currentThread.id, cwd: state.currentThread.cwd, backend: activeBackendId() } : null,
+  toDraft: (text, context) => {
+    if (state.currentThread?.id !== context.threadId || activeBackendId() !== context.backend) { toast('会话已变化，未写入草稿。', 'error'); return; }
+    const input = $('#promptInput');
+    input.value = [input.value.trim(), text].filter(Boolean).join('\n\n');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    syncComposerHeight(); input.focus(); toast('已放入草稿，请检查后发送。');
+  },
+});
+$('#chatTerminalButton').addEventListener('click', () => terminalUi.open());
 $('#artifactBackButton').addEventListener('click', backFromArtifacts);
 $('#chatThreadMoreButton').addEventListener('click', () => {
   if (state.currentThread) openThreadActionDialog(state.currentThread, 'chat');
@@ -3560,6 +3673,7 @@ $('#themeSelect').addEventListener('change', (event) => {
   applyTheme(event.target.value, { persist: true, rerender: true });
 });
 $('#backendSelect').addEventListener('change', async (event) => {
+  if (state.backendSwitching) return;
   const targetId = event.target.value;
   const currentId = activeBackendId();
   const target = state.bootstrap?.backends?.data?.find((item) => item.id === targetId);
@@ -3568,8 +3682,7 @@ $('#backendSelect').addEventListener('change', async (event) => {
     event.target.value = currentId;
     return;
   }
-  state.backendSwitching = true;
-  renderModeControls();
+  setBackendSwitching(target);
   showStartup(`正在切换到 ${target.label}…`);
   try {
     try {
@@ -3582,13 +3695,13 @@ $('#backendSelect').addEventListener('change', async (event) => {
       await post('/api/runtime/backend', { id: targetId, force: true });
     }
     state.events?.close();
+    rememberSettingsAfterAgentSwitch(targetId);
     history.replaceState({ codexMobile: true, view: 'threads' }, '', '#threads');
     window.location.reload();
   } catch (error) {
-    state.backendSwitching = false;
+    setBackendSwitching();
     showApp();
     renderBackends();
-    renderModeControls();
     toast(error.message, 'error');
   }
 });

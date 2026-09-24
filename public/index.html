@@ -14,8 +14,9 @@
   </script>
   <meta name="description" content="通过 SSH 私网控制远程 Codex，查看审批、差异和产出物。">
   <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/terminal.css?v=3">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=89">
+  <link rel="stylesheet" href="/styles.css?v=90">
   <title>Codex 随行</title>
 </head>
 <body>
@@ -53,7 +54,13 @@
         <header id="chatDetailHeader" class="chat-detail-header" hidden>
           <button id="chatBackButton" class="chat-back-button" type="button" aria-label="返回会话列表">‹</button>
           <span class="chat-detail-title"><strong id="chatDetailName">未命名会话</strong><small id="chatDetailMeta"></small></span>
-          <button id="chatThreadMoreButton" class="chat-detail-more" type="button" aria-label="会话操作" title="会话操作">⋯</button>
+          <span class="chat-detail-actions">
+            <button id="chatTerminalButton" class="chat-detail-more" type="button" aria-label="打开当前会话终端" title="终端">›_</button>
+            <button id="chatFilesButton" class="chat-detail-files" type="button" aria-label="打开当前会话文件管理" title="文件管理">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.75 5.75h5l1.5 1.75h8v7.25a1.5 1.5 0 0 1-1.5 1.5H4.25a1.5 1.5 0 0 1-1.5-1.5z"/><path d="M2.75 7.5V5.25a1.5 1.5 0 0 1 1.5-1.5h3l1.5 2h7a1.5 1.5 0 0 1 1.5 1.5v.25"/></svg>
+            </button>
+            <button id="chatThreadMoreButton" class="chat-detail-more" type="button" aria-label="会话操作" title="会话操作">⋯</button>
+          </span>
         </header>
         <div id="emptyState" class="empty-state">
           <span class="empty-orbit"><i></i></span>
@@ -184,11 +191,47 @@
     </div>
   </div>
 
+  <dialog id="terminalDialog" aria-label="当前会话终端">
+    <header>
+      <button id="terminalClose" type="button" aria-label="返回聊天" title="返回聊天">‹</button>
+      <div class="terminal-heading"><strong>终端</strong><small id="terminalPath"></small></div>
+      <span id="terminalStatus" role="status"></span>
+      <button id="terminalKeyboard" type="button" aria-label="打开终端键盘" disabled>键盘</button>
+      <details id="terminalMenu"><summary aria-label="更多终端操作" title="更多操作">⋯</summary>
+        <div class="terminal-menu-items">
+          <button id="terminalToggleKeys" type="button" aria-expanded="false" aria-controls="terminalKeys">显示快捷键</button>
+          <button id="terminalAi" type="button">输出交给 AI</button>
+          <button id="terminalEnd" type="button" class="danger">结束终端</button>
+        </div>
+      </details>
+    </header>
+    <div id="terminalKeys" class="terminal-keys" aria-label="终端快捷键" hidden>
+      <button type="button" data-terminal-key='"\u0003"'>Ctrl+C</button><button type="button" data-terminal-key='"\t"'>Tab</button><button type="button" data-terminal-key='"\u001b"'>Esc</button>
+      <button type="button" data-terminal-key='"\u001b[D"' aria-label="光标左移">←</button><button type="button" data-terminal-key='"\u001b[C"' aria-label="光标右移">→</button>
+      <button type="button" data-terminal-key='"\u001b[A"' aria-label="上一条命令">↑</button><button type="button" data-terminal-key='"\u001b[B"' aria-label="下一条命令">↓</button>
+      <button type="button" data-terminal-key='"\r"'>Enter</button>
+    </div>
+    <div id="terminalNotice" hidden><span id="terminalNoticeText" role="status"></span><button id="terminalConnect" type="button">重试</button></div>
+    <div class="terminal-surface"><div id="terminalPlaceholder" role="status">正在连接终端…</div><div id="terminalScreen"></div></div>
+  </dialog>
+  <dialog id="terminalConfirm" class="settings-dialog" aria-label="确认终端操作">
+    <header><strong>确认操作</strong></header><p id="terminalConfirmText"></p>
+    <form method="dialog"><button value="cancel">取消</button><button id="terminalConfirmOk" value="yes">确认</button></form>
+  </dialog>
+  <dialog id="terminalAiDialog" class="settings-dialog" aria-label="终端输出交接">
+    <header><strong>输出交给 AI</strong><button id="terminalAiClose" type="button" aria-label="关闭">×</button></header>
+    <p>优先使用选中文字，否则取最近 160 行（最多 12000 字符）。常见凭据已尝试隐藏，请检查并删除敏感内容；不会自动发送。</p>
+    <textarea id="terminalAiText" maxlength="16000" aria-label="检查并编辑终端输出"></textarea>
+    <select id="terminalAiAction" aria-label="交接意图"><option value="解释下面的错误与原因，先不要修改">解释错误</option><option value="根据下面的执行结果继续处理我的任务">继续处理</option></select>
+    <button id="terminalAiDraft" type="button">放入当前聊天草稿</button>
+  </dialog>
+
   <dialog id="settingsSheet" class="settings-dialog">
     <header><strong>设置</strong><button id="closeSettingsButton" class="icon-button" aria-label="关闭设置">×</button></header>
     <div class="settings-body">
       <div id="modeNotice" class="mode-notice" role="status"></div>
       <label><span>Agent</span><select id="backendSelect" aria-label="Codex Agent"></select></label>
+      <div id="settingsBackendStatus" class="mode-notice" role="status" hidden></div>
       <section class="account-quota" aria-labelledby="accountQuotaTitle">
         <div class="account-quota-head">
           <div><strong id="accountQuotaTitle">使用额度</strong><small id="accountQuotaPlan"></small></div>
@@ -352,6 +395,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script type="module" src="/app.js?v=115"></script>
+  <script type="module" src="/app.js?v=120"></script>
 </body>
 </html>
